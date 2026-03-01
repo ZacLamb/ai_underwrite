@@ -443,11 +443,15 @@ def analyze():
     if pdf_bytes:
         pdf_status = upload_pdf_to_ghl(contact_id, pdf_bytes)
 
+   pdf_base64 = ""
+    if pdf_bytes:
+        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+
     return jsonify({
         "success": True,
         "ghl_update_status": status,
-        "pdf_upload_status": pdf_status,
-        "contact_id": contact_id
+        "contact_id": contact_id,
+        "pdf_base64": pdf_base64
     })
 
 
