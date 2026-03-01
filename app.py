@@ -11,6 +11,7 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
+import base64
 
 app = Flask(__name__)
 
@@ -22,6 +23,8 @@ GROK_API_KEY = os.environ.get("GROK_API_KEY")
 LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
 SYSTEM_PROMPT = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
+
+IMPORTANT: Never mention any AI companies, models, tools, or technologies in your output. Present all findings as Fundara AI Underwriting analysis only.
 
 FORMAT (strict)
 - Markdown only, PDF-ready. No charts/images.
@@ -61,6 +64,7 @@ OUTPUT ORDER
 USER_PROMPT = """Render a clean, print-ready underwriting report. Section 0 Decision Snapshot first (<=400 words), then Sections 1-11.
 - Markdown only; tables preferred; omit N/A rows; one blank line between sections.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
+- Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
 
 Here are the bank statements:
 
@@ -98,7 +102,7 @@ def analyze_with_openai(combined_text):
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "gpt-4o",
+            "model": "gpt-4o-mini",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
@@ -110,18 +114,18 @@ def analyze_with_openai(combined_text):
         print(f"OpenAI response status: {r.status_code}")
         if "choices" not in data:
             print(f"OpenAI error response: {data}")
-            return f"OpenAI error: {data}"
+            return f"Analysis 1 error: {data}"
         return data["choices"][0]["message"]["content"]
     except Exception as openai_err:
         print(f"OpenAI exception: {str(openai_err)}")
-        return f"OpenAI failed: {str(openai_err)}"
+        return f"Analysis 1 failed: {str(openai_err)}"
 
 
 def analyze_with_claude(combined_text):
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-haiku-4-5",
             max_tokens=4000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}]
@@ -129,14 +133,14 @@ def analyze_with_claude(combined_text):
         return message.content[0].text
     except Exception as claude_err:
         print(f"Claude exception: {str(claude_err)}")
-        return f"Claude failed: {str(claude_err)}"
+        return f"Analysis 2 failed: {str(claude_err)}"
 
 
 def analyze_with_grok(combined_text):
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "grok-3",
+            "model": "grok-3-mini",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
@@ -148,43 +152,48 @@ def analyze_with_grok(combined_text):
         print(f"Grok response status: {r.status_code}")
         if "choices" not in data:
             print(f"Grok error response: {data}")
-            return f"Grok error: {data}"
+            return f"Analysis 3 error: {data}"
         return data["choices"][0]["message"]["content"]
     except Exception as grok_err:
         print(f"Grok exception: {str(grok_err)}")
-        return f"Grok failed: {str(grok_err)}"
+        return f"Analysis 3 failed: {str(grok_err)}"
 
 
-def merge_reports(gpt_report, claude_report, grok_report):
+def merge_reports(report1, report2, report3):
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        merge_prompt = f"""You are a senior underwriting editor. Merge these three underwriting reports into ONE definitive report.
+        merge_prompt = f"""You are a senior underwriting editor at Fundara. Merge these three underwriting analyses into ONE definitive report.
+
+IMPORTANT RULES:
+- Never mention any AI companies, models, tools, or technologies
+- Present all findings as Fundara AI Underwriting analysis
 - Use most accurate/conservative figures when there are discrepancies
 - If all three agree, use that figure with high confidence
 - If two agree and one differs, use the majority and note the discrepancy
 - Flag significant discrepancies in Red Flags section
 - Keep Sections 0-11 format
+- The final report should read as a single cohesive professional document
 
-GPT-4 REPORT:
-{gpt_report}
+ANALYSIS 1:
+{report1}
 
-CLAUDE REPORT:
-{claude_report}
+ANALYSIS 2:
+{report2}
 
-GROK REPORT:
-{grok_report}
+ANALYSIS 3:
+{report3}
 
-Produce the final merged underwriting report:"""
+Produce the final merged Fundara underwriting report:"""
 
         message = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-haiku-4-5",
             max_tokens=4000,
             messages=[{"role": "user", "content": merge_prompt}]
         )
         return message.content[0].text
     except Exception as merge_err:
         print(f"Merge exception: {str(merge_err)}")
-        return gpt_report
+        return report1
 
 
 def convert_to_pdf(markdown_text):
@@ -204,16 +213,15 @@ def convert_to_pdf(markdown_text):
         heading1_style = ParagraphStyle(
             'CustomH1',
             parent=styles['Heading1'],
-            fontSize=14,
+            fontSize=13,
             textColor=colors.HexColor('#1a1a2e'),
             spaceAfter=6,
             spaceBefore=12,
-            borderPad=4,
         )
         heading2_style = ParagraphStyle(
             'CustomH2',
             parent=styles['Heading2'],
-            fontSize=11,
+            fontSize=10,
             textColor=colors.HexColor('#16213e'),
             spaceAfter=4,
             spaceBefore=8,
@@ -241,10 +249,34 @@ def convert_to_pdf(markdown_text):
             fontName='Courier',
             textColor=colors.HexColor('#333333'),
         )
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Normal'],
+            fontSize=20,
+            textColor=colors.HexColor('#1a1a2e'),
+            fontName='Helvetica-Bold',
+            alignment=TA_LEFT,
+            spaceAfter=4,
+        )
+        subtitle_style = ParagraphStyle(
+            'Subtitle',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.HexColor('#888888'),
+            alignment=TA_LEFT,
+            spaceAfter=8,
+        )
+        footer_style = ParagraphStyle(
+            'Footer',
+            parent=styles['Normal'],
+            fontSize=7,
+            textColor=colors.HexColor('#aaaaaa'),
+            alignment=TA_CENTER,
+        )
 
         story = []
 
-        # Add logo
+        # Logo
         try:
             logo_response = requests.get(LOGO_URL, timeout=10)
             if logo_response.status_code == 200:
@@ -256,29 +288,10 @@ def convert_to_pdf(markdown_text):
         except Exception as logo_err:
             print(f"Logo error: {str(logo_err)}")
 
-        # Header bar
+        # Header
         story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#1a1a2e')))
         story.append(Spacer(1, 0.05 * inch))
-
-        title_style = ParagraphStyle(
-            'Title',
-            parent=styles['Normal'],
-            fontSize=18,
-            textColor=colors.HexColor('#1a1a2e'),
-            fontName='Helvetica-Bold',
-            alignment=TA_LEFT,
-            spaceAfter=4,
-        )
         story.append(Paragraph("AI Underwriting Report", title_style))
-
-        subtitle_style = ParagraphStyle(
-            'Subtitle',
-            parent=styles['Normal'],
-            fontSize=9,
-            textColor=colors.HexColor('#888888'),
-            alignment=TA_LEFT,
-            spaceAfter=8,
-        )
         story.append(Paragraph("Powered by Fundara | Confidential", subtitle_style))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
         story.append(Spacer(1, 0.15 * inch))
@@ -287,7 +300,7 @@ def convert_to_pdf(markdown_text):
         for line in markdown_text.split('\n'):
             stripped = line.strip()
             if not stripped:
-                story.append(Spacer(1, 0.08 * inch))
+                story.append(Spacer(1, 0.06 * inch))
             elif stripped.startswith('## '):
                 story.append(Spacer(1, 0.05 * inch))
                 story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dddddd')))
@@ -308,13 +321,6 @@ def convert_to_pdf(markdown_text):
         # Footer
         story.append(Spacer(1, 0.2 * inch))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
-        footer_style = ParagraphStyle(
-            'Footer',
-            parent=styles['Normal'],
-            fontSize=7,
-            textColor=colors.HexColor('#aaaaaa'),
-            alignment=TA_CENTER,
-        )
         story.append(Paragraph("This report is generated by Fundara AI and is for internal use only. Not financial advice.", footer_style))
 
         doc.build(story)
@@ -327,7 +333,8 @@ def convert_to_pdf(markdown_text):
 
 def upload_pdf_to_ghl(contact_id, pdf_bytes):
     try:
-        url = f"https://services.leadconnectorhq.com/contacts/{contact_id}/files"
+        # Upload to GHL media library first
+        upload_url = "https://services.leadconnectorhq.com/medias/upload-file"
         headers = {
             "Authorization": f"Bearer {GHL_API_KEY}",
             "Version": "2021-07-28"
@@ -336,30 +343,34 @@ def upload_pdf_to_ghl(contact_id, pdf_bytes):
             "file": ("underwriting_report.pdf", pdf_bytes, "application/pdf")
         }
         data = {
-            "fieldKey": "ai_underwriting_analysis_pdf"
+            "fileAltText": f"Underwriting Report - {contact_id}",
+            "hosted": "true"
         }
-        r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
-        print(f"GHL PDF upload status: {r.status_code} - {r.text}")
+        r = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
+        print(f"GHL media upload status: {r.status_code} - {r.text}")
 
-        if r.status_code != 200:
-            # Try alternate endpoint
-            url2 = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
-            headers2 = {
-                "Authorization": f"Bearer {GHL_API_KEY}",
-                "Version": "2021-07-28",
-                "Content-Type": "application/json"
-            }
-            import base64
-            pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
-            payload = {
-                "customFields": [{
-                    "key": "ai_underwriting_analysis_pdf",
-                    "value": pdf_b64
-                }]
-            }
-            r2 = requests.put(url2, json=payload, headers=headers2, timeout=30)
-            print(f"GHL PDF fallback status: {r2.status_code} - {r2.text}")
-            return r2.status_code
+        if r.status_code == 200:
+            upload_data = r.json()
+            file_url = upload_data.get("url") or upload_data.get("fileUrl") or upload_data.get("mediaUrl")
+            print(f"Uploaded file URL: {file_url}")
+
+            if file_url:
+                # Store URL in custom field
+                contact_url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
+                contact_headers = {
+                    "Authorization": f"Bearer {GHL_API_KEY}",
+                    "Version": "2021-07-28",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "customFields": [{
+                        "key": "ai_underwriting_analysis_pdf",
+                        "value": file_url
+                    }]
+                }
+                r2 = requests.put(contact_url, json=payload, headers=contact_headers, timeout=30)
+                print(f"GHL custom field update status: {r2.status_code}")
+                return r2.status_code
 
         return r.status_code
     except Exception as upload_err:
@@ -411,18 +422,18 @@ def analyze():
     results = {}
     with ThreadPoolExecutor(max_workers=3) as executor:
         future_to_key = {
-            executor.submit(analyze_with_openai, combined_text): "gpt",
-            executor.submit(analyze_with_claude, combined_text): "claude",
-            executor.submit(analyze_with_grok, combined_text): "grok"
+            executor.submit(analyze_with_openai, combined_text): "analysis1",
+            executor.submit(analyze_with_claude, combined_text): "analysis2",
+            executor.submit(analyze_with_grok, combined_text): "analysis3"
         }
         for future in as_completed(future_to_key):
             key = future_to_key[future]
             results[key] = future.result()
 
     final_report = merge_reports(
-        results.get("gpt", ""),
-        results.get("claude", ""),
-        results.get("grok", "")
+        results.get("analysis1", ""),
+        results.get("analysis2", ""),
+        results.get("analysis3", "")
     )
 
     status = push_to_ghl(contact_id, final_report)
