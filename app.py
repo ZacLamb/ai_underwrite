@@ -60,65 +60,97 @@ Here are the bank statements:
 
 
 def download_pdf(url):
-    headers = {"Authorization": f"Bearer {GHL_API_KEY}"}
-    response = requests.get(url, headers=headers, timeout=30)
-    if response.status_code == 200:
-        return response.content
-    return None
+    try:
+        headers = {"Authorization": f"Bearer {GHL_API_KEY}"}
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return response.content
+        print(f"Failed to download PDF: {response.status_code}")
+        return None
+    except Exception as download_err:
+        print(f"Download error: {str(download_err)}")
+        return None
 
 
 def extract_text(pdf_bytes):
-    text = ""
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-    return text
+    try:
+        text = ""
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+        return text
+    except Exception as extract_err:
+        print(f"Extract error: {str(extract_err)}")
+        return ""
 
 
 def analyze_with_openai(combined_text):
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "gpt-4o",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
-        ],
-        "max_tokens": 4000
-    }
-    r = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=120)
-    return r.json()["choices"][0]["message"]["content"]
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
+            ],
+            "max_tokens": 4000
+        }
+        r = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=120)
+        data = r.json()
+        print(f"OpenAI response status: {r.status_code}")
+        if "choices" not in data:
+            print(f"OpenAI error response: {data}")
+            return f"OpenAI error: {data}"
+        return data["choices"][0]["message"]["content"]
+    except Exception as openai_err:
+        print(f"OpenAI exception: {str(openai_err)}")
+        return f"OpenAI failed: {str(openai_err)}"
 
 
 def analyze_with_claude(combined_text):
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=4000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}]
-    )
-    return message.content[0].text
+    try:
+        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4000,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}]
+        )
+        return message.content[0].text
+    except Exception as claude_err:
+        print(f"Claude exception: {str(claude_err)}")
+        return f"Claude failed: {str(claude_err)}"
 
 
 def analyze_with_grok(combined_text):
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    payload = {
-        "model": "grok-2-latest",
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
-        ],
-        "max_tokens": 4000
-    }
-    r = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers, timeout=120)
-    return r.json()["choices"][0]["message"]["content"]
+    try:
+        headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+        payload = {
+            "model": "grok-2-latest",
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
+            ],
+            "max_tokens": 4000
+        }
+        r = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers, timeout=120)
+        data = r.json()
+        print(f"Grok response status: {r.status_code}")
+        if "choices" not in data:
+            print(f"Grok error response: {data}")
+            return f"Grok error: {data}"
+        return data["choices"][0]["message"]["content"]
+    except Exception as grok_err:
+        print(f"Grok exception: {str(grok_err)}")
+        return f"Grok failed: {str(grok_err)}"
 
 
 def merge_reports(gpt_report, claude_report, grok_report):
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
-    merge_prompt = f"""You are a senior underwriting editor. Merge these three underwriting reports into ONE definitive report.
+    try:
+        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        merge_prompt = f"""You are a senior underwriting editor. Merge these three underwriting reports into ONE definitive report.
 - Use most accurate/conservative figures when there are discrepancies
 - If all three agree, use that figure with high confidence
 - If two agree and one differs, use the majority and note the discrepancy
@@ -136,24 +168,32 @@ GROK REPORT:
 
 Produce the final merged underwriting report:"""
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": merge_prompt}]
-    )
-    return message.content[0].text
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": merge_prompt}]
+        )
+        return message.content[0].text
+    except Exception as merge_err:
+        print(f"Merge exception: {str(merge_err)}")
+        return gpt_report
 
 
 def push_to_ghl(contact_id, report):
-    url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
-    headers = {
-        "Authorization": f"Bearer {GHL_API_KEY}",
-        "Version": "2021-07-28",
-        "Content-Type": "application/json"
-    }
-    payload = {"customFields": [{"key": "ai_underwriting_analysis", "value": report}]}
-    r = requests.put(url, json=payload, headers=headers, timeout=30)
-    return r.status_code
+    try:
+        url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
+        headers = {
+            "Authorization": f"Bearer {GHL_API_KEY}",
+            "Version": "2021-07-28",
+            "Content-Type": "application/json"
+        }
+        payload = {"customFields": [{"key": "ai_underwriting_analysis", "value": report}]}
+        r = requests.put(url, json=payload, headers=headers, timeout=30)
+        print(f"GHL push status: {r.status_code} - {r.text}")
+        return r.status_code
+    except Exception as ghl_err:
+        print(f"GHL push error: {str(ghl_err)}")
+        return 500
 
 
 @app.route("/analyze", methods=["POST"])
@@ -180,20 +220,17 @@ def analyze():
     if not combined_text.strip():
         return jsonify({"error": "Could not extract text from any PDFs"}), 400
 
+    results = {}
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
+        future_to_key = {
             executor.submit(analyze_with_openai, combined_text): "gpt",
             executor.submit(analyze_with_claude, combined_text): "claude",
             executor.submit(analyze_with_grok, combined_text): "grok"
         }
-        results = {}
-        for future in as_completed(futures):
-            key = futures[future]
-            try:
-                results[key] = future.result()
-            except Exception as e:
-                 print(f"ERROR from {key}: {str(err)}")
-    results[key] = f"Error from {key}: {str(err)}"
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
+            results[key] = future.result()
+
     final_report = merge_reports(
         results.get("gpt", ""),
         results.get("claude", ""),
