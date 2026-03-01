@@ -5,6 +5,11 @@ import pdfplumber
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from anthropic import Anthropic
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib import colors
 
 app = Flask(__name__)
 
@@ -179,6 +184,62 @@ Produce the final merged underwriting report:"""
         return gpt_report
 
 
+def convert_to_pdf(markdown_text):
+    try:
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter,
+                                rightMargin=inch, leftMargin=inch,
+                                topMargin=inch, bottomMargin=inch)
+
+        styles = getSampleStyleSheet()
+        story = []
+
+        for line in markdown_text.split('\n'):
+            if line.startswith('## '):
+                story.append(Spacer(1, 0.1 * inch))
+                story.append(Paragraph(line[3:], styles['Heading1']))
+            elif line.startswith('### '):
+                story.append(Paragraph(line[4:], styles['Heading2']))
+            elif line.startswith('**') and line.endswith('**'):
+                story.append(Paragraph(f"<b>{line[2:-2]}</b>", styles['Normal']))
+            elif line.startswith('- '):
+                story.append(Paragraph(f"• {line[2:]}", styles['Normal']))
+            elif line.startswith('|'):
+                story.append(Paragraph(line, styles['Code']))
+            elif line.strip():
+                story.append(Paragraph(line, styles['Normal']))
+            else:
+                story.append(Spacer(1, 0.1 * inch))
+
+        doc.build(story)
+        buffer.seek(0)
+        return buffer.getvalue()
+    except Exception as pdf_err:
+        print(f"PDF conversion error: {str(pdf_err)}")
+        return None
+
+
+def upload_pdf_to_ghl(contact_id, pdf_bytes):
+    try:
+        url = f"https://services.leadconnectorhq.com/contacts/{contact_id}/upload-files"
+        headers = {
+            "Authorization": f"Bearer {GHL_API_KEY}",
+            "Version": "2021-07-28"
+        }
+        files = {
+            "fileAttachment": ("underwriting_report.pdf", pdf_bytes, "application/pdf")
+        }
+        data = {
+            "fieldKey": "ai_underwriting_analysis_pdf"
+        }
+        r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+        print(f"GHL PDF upload status: {r.status_code} - {r.text}")
+        return r.status_code
+    except Exception as upload_err:
+        print(f"PDF upload error: {str(upload_err)}")
+        return 500
+
+
 def push_to_ghl(contact_id, report):
     try:
         url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
@@ -239,7 +300,17 @@ def analyze():
 
     status = push_to_ghl(contact_id, final_report)
 
-    return jsonify({"success": True, "ghl_update_status": status, "contact_id": contact_id})
+    pdf_bytes = convert_to_pdf(final_report)
+    pdf_status = 0
+    if pdf_bytes:
+        pdf_status = upload_pdf_to_ghl(contact_id, pdf_bytes)
+
+    return jsonify({
+        "success": True,
+        "ghl_update_status": status,
+        "pdf_upload_status": pdf_status,
+        "contact_id": contact_id
+    })
 
 
 @app.route("/health", methods=["GET"])
