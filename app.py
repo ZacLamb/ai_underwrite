@@ -136,7 +136,7 @@ def analyze_with_grok(combined_text):
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "grok-2",
+            "model": "grok-3",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
