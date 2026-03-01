@@ -117,7 +117,7 @@ def analyze_with_grok(combined_text):
 
 
 def merge_reports(gpt_report, claude_report, grok_report):
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
     merge_prompt = f"""You are a senior underwriting editor. Merge these three underwriting reports into ONE definitive report.
 - Use most accurate/conservative figures when there are discrepancies
 - If all three agree, use that figure with high confidence
@@ -136,13 +136,12 @@ GROK REPORT:
 
 Produce the final merged underwriting report:"""
 
-    payload = {
-        "model": "gpt-4o",
-        "messages": [{"role": "user", "content": merge_prompt}],
-        "max_tokens": 4000
-    }
-    r = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=120)
-    return r.json()["choices"][0]["message"]["content"]
+    message = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=4000,
+        messages=[{"role": "user", "content": merge_prompt}]
+    )
+    return message.content[0].text
 
 
 def push_to_ghl(contact_id, report):
