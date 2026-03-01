@@ -6,10 +6,11 @@ from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from anthropic import Anthropic
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable
 from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
 app = Flask(__name__)
 
@@ -17,6 +18,8 @@ GHL_API_KEY = os.environ.get("GHL_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
+
+LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
 SYSTEM_PROMPT = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
 
@@ -133,7 +136,7 @@ def analyze_with_grok(combined_text):
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "grok-2-latest",
+            "model": "grok-2",
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(combined_text=combined_text)}
@@ -187,29 +190,132 @@ Produce the final merged underwriting report:"""
 def convert_to_pdf(markdown_text):
     try:
         buffer = io.BytesIO()
-        doc = SimpleDocTemplate(buffer, pagesize=letter,
-                                rightMargin=inch, leftMargin=inch,
-                                topMargin=inch, bottomMargin=inch)
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=letter,
+            rightMargin=0.75 * inch,
+            leftMargin=0.75 * inch,
+            topMargin=0.75 * inch,
+            bottomMargin=0.75 * inch
+        )
 
         styles = getSampleStyleSheet()
+
+        heading1_style = ParagraphStyle(
+            'CustomH1',
+            parent=styles['Heading1'],
+            fontSize=14,
+            textColor=colors.HexColor('#1a1a2e'),
+            spaceAfter=6,
+            spaceBefore=12,
+            borderPad=4,
+        )
+        heading2_style = ParagraphStyle(
+            'CustomH2',
+            parent=styles['Heading2'],
+            fontSize=11,
+            textColor=colors.HexColor('#16213e'),
+            spaceAfter=4,
+            spaceBefore=8,
+        )
+        normal_style = ParagraphStyle(
+            'CustomNormal',
+            parent=styles['Normal'],
+            fontSize=9,
+            leading=14,
+            textColor=colors.HexColor('#333333'),
+        )
+        bullet_style = ParagraphStyle(
+            'CustomBullet',
+            parent=styles['Normal'],
+            fontSize=9,
+            leading=14,
+            leftIndent=20,
+            textColor=colors.HexColor('#333333'),
+        )
+        code_style = ParagraphStyle(
+            'CustomCode',
+            parent=styles['Code'],
+            fontSize=7.5,
+            leading=11,
+            fontName='Courier',
+            textColor=colors.HexColor('#333333'),
+        )
+
         story = []
 
+        # Add logo
+        try:
+            logo_response = requests.get(LOGO_URL, timeout=10)
+            if logo_response.status_code == 200:
+                logo_buffer = io.BytesIO(logo_response.content)
+                logo = Image(logo_buffer, width=2 * inch, height=0.6 * inch)
+                logo.hAlign = 'LEFT'
+                story.append(logo)
+                story.append(Spacer(1, 0.1 * inch))
+        except Exception as logo_err:
+            print(f"Logo error: {str(logo_err)}")
+
+        # Header bar
+        story.append(HRFlowable(width="100%", thickness=2, color=colors.HexColor('#1a1a2e')))
+        story.append(Spacer(1, 0.05 * inch))
+
+        title_style = ParagraphStyle(
+            'Title',
+            parent=styles['Normal'],
+            fontSize=18,
+            textColor=colors.HexColor('#1a1a2e'),
+            fontName='Helvetica-Bold',
+            alignment=TA_LEFT,
+            spaceAfter=4,
+        )
+        story.append(Paragraph("AI Underwriting Report", title_style))
+
+        subtitle_style = ParagraphStyle(
+            'Subtitle',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.HexColor('#888888'),
+            alignment=TA_LEFT,
+            spaceAfter=8,
+        )
+        story.append(Paragraph("Powered by Fundara | Confidential", subtitle_style))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
+        story.append(Spacer(1, 0.15 * inch))
+
+        # Parse markdown
         for line in markdown_text.split('\n'):
-            if line.startswith('## '):
-                story.append(Spacer(1, 0.1 * inch))
-                story.append(Paragraph(line[3:], styles['Heading1']))
-            elif line.startswith('### '):
-                story.append(Paragraph(line[4:], styles['Heading2']))
-            elif line.startswith('**') and line.endswith('**'):
-                story.append(Paragraph(f"<b>{line[2:-2]}</b>", styles['Normal']))
-            elif line.startswith('- '):
-                story.append(Paragraph(f"• {line[2:]}", styles['Normal']))
-            elif line.startswith('|'):
-                story.append(Paragraph(line, styles['Code']))
-            elif line.strip():
-                story.append(Paragraph(line, styles['Normal']))
+            stripped = line.strip()
+            if not stripped:
+                story.append(Spacer(1, 0.08 * inch))
+            elif stripped.startswith('## '):
+                story.append(Spacer(1, 0.05 * inch))
+                story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor('#dddddd')))
+                story.append(Paragraph(stripped[3:], heading1_style))
+            elif stripped.startswith('### '):
+                story.append(Paragraph(stripped[4:], heading2_style))
+            elif stripped.startswith('- '):
+                text = stripped[2:].replace('**', '<b>', 1).replace('**', '</b>', 1)
+                story.append(Paragraph(f"• {text}", bullet_style))
+            elif stripped.startswith('|'):
+                story.append(Paragraph(stripped, code_style))
+            elif stripped.startswith('**') and stripped.endswith('**'):
+                story.append(Paragraph(f"<b>{stripped[2:-2]}</b>", normal_style))
             else:
-                story.append(Spacer(1, 0.1 * inch))
+                text = stripped.replace('**', '<b>', 1).replace('**', '</b>', 1)
+                story.append(Paragraph(text, normal_style))
+
+        # Footer
+        story.append(Spacer(1, 0.2 * inch))
+        story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor('#cccccc')))
+        footer_style = ParagraphStyle(
+            'Footer',
+            parent=styles['Normal'],
+            fontSize=7,
+            textColor=colors.HexColor('#aaaaaa'),
+            alignment=TA_CENTER,
+        )
+        story.append(Paragraph("This report is generated by Fundara AI and is for internal use only. Not financial advice.", footer_style))
 
         doc.build(story)
         buffer.seek(0)
@@ -221,19 +327,40 @@ def convert_to_pdf(markdown_text):
 
 def upload_pdf_to_ghl(contact_id, pdf_bytes):
     try:
-        url = f"https://services.leadconnectorhq.com/contacts/{contact_id}/upload-files"
+        url = f"https://services.leadconnectorhq.com/contacts/{contact_id}/files"
         headers = {
             "Authorization": f"Bearer {GHL_API_KEY}",
             "Version": "2021-07-28"
         }
         files = {
-            "fileAttachment": ("underwriting_report.pdf", pdf_bytes, "application/pdf")
+            "file": ("underwriting_report.pdf", pdf_bytes, "application/pdf")
         }
         data = {
             "fieldKey": "ai_underwriting_analysis_pdf"
         }
         r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
         print(f"GHL PDF upload status: {r.status_code} - {r.text}")
+
+        if r.status_code != 200:
+            # Try alternate endpoint
+            url2 = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
+            headers2 = {
+                "Authorization": f"Bearer {GHL_API_KEY}",
+                "Version": "2021-07-28",
+                "Content-Type": "application/json"
+            }
+            import base64
+            pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+            payload = {
+                "customFields": [{
+                    "key": "ai_underwriting_analysis_pdf",
+                    "value": pdf_b64
+                }]
+            }
+            r2 = requests.put(url2, json=payload, headers=headers2, timeout=30)
+            print(f"GHL PDF fallback status: {r2.status_code} - {r2.text}")
+            return r2.status_code
+
         return r.status_code
     except Exception as upload_err:
         print(f"PDF upload error: {str(upload_err)}")
@@ -250,7 +377,7 @@ def push_to_ghl(contact_id, report):
         }
         payload = {"customFields": [{"key": "ai_underwriting_analysis", "value": report}]}
         r = requests.put(url, json=payload, headers=headers, timeout=30)
-        print(f"GHL push status: {r.status_code} - {r.text}")
+        print(f"GHL push status: {r.status_code}")
         return r.status_code
     except Exception as ghl_err:
         print(f"GHL push error: {str(ghl_err)}")
