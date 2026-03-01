@@ -2,3 +2,5 @@ flask
 requests
 pdfplumber
 anthropic
+reportlab
+markdown
