@@ -331,53 +331,6 @@ def convert_to_pdf(markdown_text):
         return None
 
 
-def upload_pdf_to_ghl(contact_id, pdf_bytes):
-    try:
-        # Upload to GHL media library first
-        upload_url = "https://services.leadconnectorhq.com/medias/upload-file"
-        headers = {
-            "Authorization": f"Bearer {GHL_API_KEY}",
-            "Version": "2021-07-28"
-        }
-        files = {
-            "file": ("underwriting_report.pdf", pdf_bytes, "application/pdf")
-        }
-        data = {
-            "fileAltText": f"Underwriting Report - {contact_id}",
-            "hosted": "true"
-        }
-        r = requests.post(upload_url, headers=headers, files=files, data=data, timeout=30)
-        print(f"GHL media upload status: {r.status_code} - {r.text}")
-
-        if r.status_code == 200:
-            upload_data = r.json()
-            file_url = upload_data.get("url") or upload_data.get("fileUrl") or upload_data.get("mediaUrl")
-            print(f"Uploaded file URL: {file_url}")
-
-            if file_url:
-                # Store URL in custom field
-                contact_url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
-                contact_headers = {
-                    "Authorization": f"Bearer {GHL_API_KEY}",
-                    "Version": "2021-07-28",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "customFields": [{
-                        "key": "ai_underwriting_analysis_pdf",
-                        "value": file_url
-                    }]
-                }
-                r2 = requests.put(contact_url, json=payload, headers=contact_headers, timeout=30)
-                print(f"GHL custom field update status: {r2.status_code}")
-                return r2.status_code
-
-        return r.status_code
-    except Exception as upload_err:
-        print(f"PDF upload error: {str(upload_err)}")
-        return 500
-
-
 def push_to_ghl(contact_id, report):
     try:
         url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
@@ -438,14 +391,11 @@ def analyze():
 
     status = push_to_ghl(contact_id, final_report)
 
+    pdf_base64 = ""
     pdf_bytes = convert_to_pdf(final_report)
-    pdf_status = 0
-    if pdf_bytes:
-        pdf_status = upload_pdf_to_ghl(contact_id, pdf_bytes)
-
-   pdf_base64 = ""
     if pdf_bytes:
         pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
+        print(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
 
     return jsonify({
         "success": True,
