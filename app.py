@@ -193,8 +193,8 @@ def analyze():
             try:
                 results[key] = future.result()
             except Exception as e:
-                results[key] = f"Error from {key}: {str(e)}"
-
+                 print(f"ERROR from {key}: {str(e)}")
+    results[key] = f"Error from {key}: {str(e)}"
     final_report = merge_reports(
         results.get("gpt", ""),
         results.get("claude", ""),
