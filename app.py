@@ -1,7 +1,9 @@
 import os
 import io
+import uuid
 import requests
 import pdfplumber
+import boto3
 from flask import Flask, request, jsonify
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from anthropic import Anthropic
@@ -19,6 +21,10 @@ GHL_API_KEY = os.environ.get("GHL_API_KEY")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_BUCKET = "fundara-reports"
 
 LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
@@ -69,6 +75,35 @@ USER_PROMPT = """Render a clean, print-ready underwriting report. Section 0 Deci
 Here are the bank statements:
 
 {combined_text}"""
+
+
+def get_r2_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        region_name="auto"
+    )
+
+
+def upload_to_r2(pdf_bytes, contact_id):
+    try:
+        client = get_r2_client()
+        filename = f"reports/{contact_id}_{uuid.uuid4().hex[:8]}.pdf"
+        client.put_object(
+            Bucket=R2_BUCKET,
+            Key=filename,
+            Body=pdf_bytes,
+            ContentType="application/pdf",
+            ACL="public-read"
+        )
+        url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/{R2_BUCKET}/{filename}"
+        print(f"PDF uploaded to R2: {url}")
+        return url
+    except Exception as r2_err:
+        print(f"R2 upload error: {str(r2_err)}")
+        return None
 
 
 def download_pdf(url):
@@ -331,7 +366,7 @@ def convert_to_pdf(markdown_text):
         return None
 
 
-def push_to_ghl(contact_id, report):
+def push_to_ghl(contact_id, report, pdf_url=""):
     try:
         url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
         headers = {
@@ -339,7 +374,10 @@ def push_to_ghl(contact_id, report):
             "Version": "2021-07-28",
             "Content-Type": "application/json"
         }
-        payload = {"customFields": [{"key": "ai_underwriting_analysis", "value": report}]}
+        custom_fields = [{"key": "ai_underwriting_analysis", "value": report}]
+        if pdf_url:
+            custom_fields.append({"key": "ai_underwriting_analysis_pdf", "value": pdf_url})
+        payload = {"customFields": custom_fields}
         r = requests.put(url, json=payload, headers=headers, timeout=30)
         print(f"GHL push status: {r.status_code}")
         return r.status_code
@@ -389,19 +427,18 @@ def analyze():
         results.get("analysis3", "")
     )
 
-    status = push_to_ghl(contact_id, final_report)
-
-    pdf_base64 = ""
+    pdf_url = ""
     pdf_bytes = convert_to_pdf(final_report)
     if pdf_bytes:
-        pdf_base64 = base64.b64encode(pdf_bytes).decode('utf-8')
-        print(f"PDF generated successfully, size: {len(pdf_bytes)} bytes")
+        pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
+
+    status = push_to_ghl(contact_id, final_report, pdf_url)
 
     return jsonify({
         "success": True,
         "ghl_update_status": status,
         "contact_id": contact_id,
-        "pdf_base64": pdf_base64
+        "pdf_url": pdf_url
     })
 
 
