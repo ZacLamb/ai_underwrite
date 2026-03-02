@@ -3,4 +3,4 @@ requests
 pdfplumber
 anthropic
 reportlab
-markdown
+boto3
