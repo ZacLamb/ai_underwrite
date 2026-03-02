@@ -13,7 +13,6 @@ from reportlab.lib.units import inch
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, HRFlowable
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-import base64
 
 app = Flask(__name__)
 
@@ -24,6 +23,7 @@ GROK_API_KEY = os.environ.get("GROK_API_KEY")
 R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
 R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
+R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")
 R2_BUCKET = "fundara-reports"
 
 LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
@@ -95,10 +95,9 @@ def upload_to_r2(pdf_bytes, contact_id):
             Bucket=R2_BUCKET,
             Key=filename,
             Body=pdf_bytes,
-            ContentType="application/pdf",
-            ACL="public-read"
+            ContentType="application/pdf"
         )
-        url = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com/{R2_BUCKET}/{filename}"
+        url = f"{R2_PUBLIC_URL}/{filename}"
         print(f"PDF uploaded to R2: {url}")
         return url
     except Exception as r2_err:
