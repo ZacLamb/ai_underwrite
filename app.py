@@ -51,7 +51,7 @@ TL      = HexColor('#B0BEC5')
 W_PAGE  = 7.0 * inch
 
 # ══════════════════════════════════════════════════════════════════
-# DETAILED PROMPTS — original powerful version, do not modify
+# DETAILED PROMPTS — original working version, do not modify
 # ══════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT_FULL = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
 
@@ -64,97 +64,38 @@ FORMAT (strict)
 - USD whole dollars with commas; % to 1 decimal.
 - Mask account numbers.
 
-EXTRACT PER MONTH:
-- Total deposits & count
-- Total withdrawals & count
-- Ending balance
-- Avg daily balance
-- Negative balance days
-- Low balance days (under $100)
-- Overdraft/NSF fees
-- Funding inflows >=5k (label source)
-- Recurring MCA debits (payee, daily amount, frequency)
-- Deposit channel mix % (Zelle/ACH/Check/Wire/Cash)
-- Top-5 deposit sources with amounts
-- Top-5 expense sinks with amounts
+BANK STATEMENTS
+Monthly table:
+- Deposits, withdrawals, ending bal
+- Funding inflows >=5k
+- Recurring MCA debits
+- Daily balances: avg, NEG days, LOW days
+- Deposit channel mix %
+- Top-5 deposit sources & expense sinks
 
-SCORING (1=Best, 5=Weak) — weight each:
-Deposits 15%; Net Cash Flow 10%; Ledger Quality 10%; Overdraft Days 10%;
+SCORING (1=Best,5=Weak)
+Deposits 15%; Net Cash 10%; Ledger 10%; OD Days 10%;
 MCA Density 15%; Tax Compliance 5%; Vendor Concentration 5%;
 Seasonality 5%; New Capital 5%; Statement Integrity 5%.
-Compute weighted score. Flag if >3.5 overall.
 
-RED FLAGS — auto-flag any of:
-- Negative ending balance any month
-- >5 overdraft days/month
-- MCA payments >20% of deposits
-- Same-day large deposit + withdrawal (round-trip)
-- Deposits from known MCA funders
-- No payroll visible for stated headcount
-- Ending balance <10% of avg monthly deposits
-- Revenue declining >15% month-over-month
+OUTPUT ORDER
+0) Decision Snapshot
+1) SCORECARD
+2) Deal Sheet
+3) Monthly Ledger Table
+4) Portfolio Metrics
+5) Business Info
+6) Bank Info
+7) Red Flags
+8) About the Business
+9) Notice-Only
+10) Online Presence
+11) Failure & Scope"""
 
-OUTPUT SECTIONS (in order):
-## Section 0: Decision Snapshot
-## Section 1: Scorecard
-## Section 2: Deal Sheet
-## Section 3: Monthly Ledger Table
-## Section 4: Portfolio Metrics
-## Section 5: Business Info
-## Section 6: Bank Info
-## Section 7: Red Flags
-## Section 8: About the Business
-## Section 9: Notice-Only
-## Section 10: Online Presence
-## Section 11: Failure & Scope"""
-
-USER_PROMPT_FULL = """You are producing a Fundara AI Underwriting Report. Be exhaustive, precise, and conservative.
-
-SECTION 0 — Decision Snapshot (<=400 words):
-- Lead with RECOMMENDATION: APPROVE / DECLINE / CONDITIONAL
-- State the single most important reason in one sentence
-- Key metrics summary: avg monthly deposits, avg daily balance, negative days, MCA density
-- Overall risk rating: LOW / MEDIUM / HIGH / CRITICAL
-- If conditional: state exact conditions required
-
-SECTION 1 — Scorecard:
-Weighted score table. One row per criterion. Show score (1-5), weight, weighted value. Final row = total weighted score.
-
-SECTION 2 — Deal Sheet:
-Two-column table. Include: Business Name, DBA, Owner, Entity Type, Bank, Account Type, Account (masked), Review Period, Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Total Withdrawals, Net Cash Flow, Negative Days (avg/month), Overdraft Fees (total), Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision.
-
-SECTION 3 — Monthly Ledger Table:
-One row per month. Columns: Month, Deposits, Withdrawals, Ending Balance, Avg Daily Bal, Neg Days, OD Fees, MCA Debits, Largest Deposit, Largest Withdrawal.
-
-SECTION 4 — Portfolio Metrics:
-- Deposit channel mix % table
-- Top-5 deposit sources table (source, total, % of deposits)
-- Top-5 expense sinks table (payee, total, % of withdrawals)
-- MCA position detail table (payee, est. daily debit, monthly cost, % of deposits)
-
-SECTION 5 — Business Info:
-All available: name, DBA, owner, address, phone, entity type, industry, years in business, estimated employees.
-
-SECTION 6 — Bank Info:
-Bank name, branch, account type, account number (masked), statement period, currency.
-
-SECTION 7 — Red Flags:
-Severity-tagged table. Columns: Severity (CRITICAL/HIGH/MEDIUM/LOW), Flag, Evidence, Impact.
-
-SECTION 8 — About the Business:
-2-3 paragraph narrative. Revenue patterns, operational health, deposit behavior, payment discipline.
-
-SECTION 9 — Notice-Only:
-Items noted but not penalized. Unusual one-time items, data gaps, assumptions made.
-
-SECTION 10 — Online Presence:
-Any business identifiers found in statements (website, phone, address). Note if none found.
-
-SECTION 11 — Failure & Scope:
-What could not be analyzed and why. Data limitations. Confidence level: HIGH / MEDIUM / LOW.
-
-Mask all account numbers. USD whole dollars with commas. Percentages to 1 decimal.
-Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
+USER_PROMPT_FULL = """Render a clean, print-ready underwriting report. Section 0 Decision Snapshot first (<=400 words), then Sections 1-11.
+- Markdown only; tables preferred; omit N/A rows; one blank line between sections.
+- USD whole dollars with commas; percentages 1 decimal; mask account numbers.
+- Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
 
 Here are the bank statements:
 
@@ -358,6 +299,7 @@ def _parse_table(table_lines):
         return None
     ncols = max(len(r) for r in rows)
 
+    # Give 2-column tables better proportions
     if ncols == 2:
         col_widths = [W_PAGE * 0.35, W_PAGE * 0.65]
     else:
@@ -375,7 +317,7 @@ def _parse_table(table_lines):
             else:
                 sty = _cell_color_style(cell)
                 if ci == 0:
-                    sty = STY['td_b']
+                    sty = STY['td_b'] if ri % 2 == 0 else STY['td']
             fcells.append(Paragraph(clean, sty))
         flowable_rows.append(fcells)
 
@@ -576,10 +518,9 @@ def markdown_to_flowables(markdown_text):
             continue
 
         text = _parse_md_bold(stripped)
-        if any(k in stripped.upper() for k in ('RECOMMENDATION: DECLINE', 'RECOMMENDATION: APPROVE', 'RECOMMENDATION: CONDITIONAL')):
+        if any(k in stripped.upper() for k in ('RECOMMENDATION: DECLINE', 'RECOMMENDATION: APPROVE')):
             is_dec = 'DECLINE' in stripped.upper()
-            is_cond = 'CONDITIONAL' in stripped.upper()
-            c_hex = '#E53935' if is_dec else ('#F57C00' if is_cond else '#43A047')
+            c_hex = '#E53935' if is_dec else '#43A047'
             story.append(Paragraph(
                 f'<b><font color="{c_hex}">{text}</font></b>', STY['body_b']))
         else:
@@ -819,11 +760,9 @@ Section 2 must use TWO separate 2-column tables (Field | Value format):
 - ### Table 2 - Financial Summary & Decision: (Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days, Overdraft Fees, Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision)
 Do NOT create wide multi-column tables. Keep it concise for broker use."""
         else:
-            format_instruction = """Keep all Sections 0-11 using ## headings for each section.
-Be exhaustive and conservative. Use the most conservative figures across all three analyses.
-Include all 12 sections with full detail — do not summarize or truncate any section.
-Lead Section 0 with RECOMMENDATION: APPROVE / DECLINE / CONDITIONAL in bold.
-The final report must read as a single cohesive professional Fundara underwriting document."""
+            format_instruction = """Keep Sections 0-11 format.
+The final report should read as a single cohesive professional document.
+Use the most conservative figures when analyses disagree."""
 
         merge_prompt = f"""You are a senior underwriting editor at Fundara. Merge these three underwriting analyses into ONE definitive report.
 
