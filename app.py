@@ -109,7 +109,7 @@ FORMAT (strict)
 - USD whole dollars with commas; % to 1 decimal.
 - Mask account numbers.
 
-SECTION 0 - Decision Snapshot (<=300 words):
+## Section 0 - Decision Snapshot (<=300 words):
 - Business name, bank, account masked
 - Average monthly deposits
 - Average daily balance
@@ -120,10 +120,10 @@ SECTION 0 - Decision Snapshot (<=300 words):
 - Max recommended position and factor rate range
 - One paragraph summary of risk
 
-SECTION 2 - Deal Sheet:
+## Section 2 - Deal Sheet:
 Output TWO separate 2-column markdown tables (Field | Value format).
 
-TABLE 1 - Business Info:
+### Table 1 - Business Info:
 | Field | Value |
 |-------|-------|
 | Business Name | ... |
@@ -133,7 +133,7 @@ TABLE 1 - Business Info:
 | Account Type | ... |
 | Review Period | ... |
 
-TABLE 2 - Financial Summary & Decision:
+### Table 2 - Financial Summary & Decision:
 | Field | Value |
 |-------|-------|
 | Avg Monthly Deposits | ... |
@@ -150,6 +150,7 @@ Use ONLY these two 2-column tables. Do NOT create a wide multi-column table."""
 
 USER_PROMPT_QUICK = """Render a quick broker decision report with ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
 - Markdown only; one blank line between sections.
+- Use ## for section headings and ### for table headings.
 - Section 0: bullet list format, concise.
 - Section 2: TWO separate 2-column tables (Field | Value). First table for business info, second for financials and decision.
 - Do NOT create a wide multi-column table — brokers need clean readable output.
@@ -247,7 +248,7 @@ def _draw_page(canvas, doc, logo_img=None):
     canvas.restoreState()
 
 
-def _draw_cover(canvas, doc, logo_img=None):
+def _draw_cover(canvas, doc, logo_bytes=None):
     canvas.saveState()
     pw, ph = letter
     canvas.setFillColor(BG)
@@ -292,7 +293,6 @@ def _parse_table(table_lines):
         return None
     ncols = max(len(r) for r in rows)
 
-    # For 2-column tables give first column more width
     if ncols == 2:
         col_widths = [W_PAGE * 0.35, W_PAGE * 0.65]
     else:
@@ -475,6 +475,14 @@ def markdown_to_flowables(markdown_text):
             i += 1
             continue
 
+        # Catch unlabeled section/table headers
+        if re.match(r'^(SECTION|TABLE)\s+\d+', stripped, re.IGNORECASE):
+            story.append(Spacer(1, 8))
+            story.append(Paragraph(stripped.rstrip(':'), STY['h2']))
+            story.append(Spacer(1, 4))
+            i += 1
+            continue
+
         bold_only = re.match(r'^\*\*(.+)\*\*$', stripped)
         if bold_only:
             story.append(Paragraph(f'<b>{bold_only.group(1)}</b>', STY['body_b']))
@@ -529,14 +537,17 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
             bottomMargin=0.55 * inch,
         )
 
+        # Load logo bytes once, create fresh Image objects from same bytes
+        logo_bytes = None
         logo_img_draw = None
         logo_img_flow = None
         try:
             logo_resp = requests.get(LOGO_URL, timeout=10)
             if logo_resp.status_code == 200:
-                logo_img_draw = Image(io.BytesIO(logo_resp.content),
+                logo_bytes = logo_resp.content
+                logo_img_draw = Image(io.BytesIO(logo_bytes),
                                       width=1.6 * inch, height=0.38 * inch)
-                logo_img_flow = Image(io.BytesIO(logo_resp.content),
+                logo_img_flow = Image(io.BytesIO(logo_bytes),
                                       width=2.4 * inch, height=0.56 * inch)
                 logo_img_flow.hAlign = 'LEFT'
         except Exception as logo_err:
@@ -576,7 +587,7 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
                            textColor=TG, alignment=TA_CENTER)))
 
         def on_first(canvas, doc):
-            _draw_cover(canvas, doc, logo_img_draw)
+            _draw_cover(canvas, doc, logo_bytes)
 
         def on_later(canvas, doc):
             _draw_page(canvas, doc, logo_img_draw)
@@ -737,9 +748,10 @@ def merge_reports(report1, report2, report3, report_type="Detailed"):
 
         if report_type == "Quick":
             format_instruction = """Output ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
+Use ## for section headings and ### for table headings.
 Section 2 must use TWO separate 2-column tables (Field | Value format):
-- Table 1: Business Info (Business Name, DBA, Owner, Bank, Account Type, Review Period)
-- Table 2: Financial Summary & Decision (Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days, Overdraft Fees, Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision)
+- ### Table 1 - Business Info: (Business Name, DBA, Owner, Bank, Account Type, Review Period)
+- ### Table 2 - Financial Summary & Decision: (Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days, Overdraft Fees, Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision)
 Do NOT create wide multi-column tables. Keep it concise for broker use."""
         else:
             format_instruction = "Keep Sections 0-11 format. The final report should read as a single cohesive professional document."
