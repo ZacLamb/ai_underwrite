@@ -22,7 +22,6 @@ from reportlab.lib import colors
 app = Flask(__name__)
 
 # ── ENV ────────────────────────────────────────────────────────────
-GHL_API_KEY          = os.environ.get("GHL_API_KEY")
 OPENAI_API_KEY       = os.environ.get("OPENAI_API_KEY")
 ANTHROPIC_API_KEY    = os.environ.get("ANTHROPIC_API_KEY")
 GROK_API_KEY         = os.environ.get("GROK_API_KEY")
@@ -748,17 +747,24 @@ Produce the final merged Fundara underwriting report:"""
         return report1
 
 
-# ── ROUTES ──────────────────────────────────────────────────────────
+# ── ROUTE ───────────────────────────────────────────────────────────
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = request.json
+
     contact_id = data.get("contact_id")
-    ghl_key = data.get("ghl_api_key") or GHL_API_KEY
+    location_id = data.get("location_id")
+    ghl_key = data.get("ghl_api_key")
     report_type = data.get("report_type", "Detailed").strip()
 
-    print(f"Report type received: {report_type}")
+    print(f"Request — location: {location_id} | contact: {contact_id} | type: {report_type}")
 
-    # Select prompts based on report type
+    if not ghl_key:
+        return jsonify({"error": "No GHL API key provided"}), 400
+
+    if not contact_id:
+        return jsonify({"error": "No contact ID provided"}), 400
+
     if report_type == "Quick":
         system_prompt = SYSTEM_PROMPT_QUICK
         user_prompt = USER_PROMPT_QUICK
@@ -813,6 +819,7 @@ def analyze():
     return jsonify({
         "success": True,
         "ghl_update_status": status,
+        "location_id": location_id,
         "contact_id": contact_id,
         "report_type": report_type,
         "pdf_url": pdf_url
