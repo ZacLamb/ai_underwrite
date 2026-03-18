@@ -120,25 +120,39 @@ SECTION 0 - Decision Snapshot (<=300 words):
 - Max recommended position and factor rate range
 - One paragraph summary of risk
 
-SECTION 2 - Deal Sheet (table format):
-- Business Name
-- DBA
-- Owner
-- Bank
-- Account Type
-- Review Period
-- Avg Monthly Deposits
-- Avg Daily Balance
-- Total Deposits
-- Negative Days (avg/month)
-- Overdraft Fees
-- Existing MCA Positions
-- Recommended Position
-- Recommended Factor Rate
-- Decision"""
+SECTION 2 - Deal Sheet:
+Output TWO separate 2-column markdown tables (Field | Value format).
+
+TABLE 1 - Business Info:
+| Field | Value |
+|-------|-------|
+| Business Name | ... |
+| DBA | ... |
+| Owner | ... |
+| Bank | ... |
+| Account Type | ... |
+| Review Period | ... |
+
+TABLE 2 - Financial Summary & Decision:
+| Field | Value |
+|-------|-------|
+| Avg Monthly Deposits | ... |
+| Avg Daily Balance | ... |
+| Total Deposits | ... |
+| Negative Days (avg/month) | ... |
+| Overdraft Fees | ... |
+| Existing MCA Positions | ... |
+| Recommended Position | ... |
+| Recommended Factor Rate | ... |
+| Decision | APPROVE or DECLINE or CONDITIONAL |
+
+Use ONLY these two 2-column tables. Do NOT create a wide multi-column table."""
 
 USER_PROMPT_QUICK = """Render a quick broker decision report with ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
-- Markdown only; tables preferred; one blank line between sections.
+- Markdown only; one blank line between sections.
+- Section 0: bullet list format, concise.
+- Section 2: TWO separate 2-column tables (Field | Value). First table for business info, second for financials and decision.
+- Do NOT create a wide multi-column table — brokers need clean readable output.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
 - Keep it concise — brokers need fast decisions, not lengthy analysis.
@@ -277,7 +291,13 @@ def _parse_table(table_lines):
     if not rows:
         return None
     ncols = max(len(r) for r in rows)
-    col_w = W_PAGE / ncols
+
+    # For 2-column tables give first column more width
+    if ncols == 2:
+        col_widths = [W_PAGE * 0.35, W_PAGE * 0.65]
+    else:
+        col_widths = [W_PAGE / ncols] * ncols
+
     flowable_rows = []
     for ri, row in enumerate(rows):
         while len(row) < ncols:
@@ -290,10 +310,11 @@ def _parse_table(table_lines):
             else:
                 sty = _cell_color_style(cell)
                 if ci == 0:
-                    sty = STY['td_b'] if ri % 2 == 0 else STY['td']
+                    sty = STY['td_b']
             fcells.append(Paragraph(clean, sty))
         flowable_rows.append(fcells)
-    t = Table(flowable_rows, colWidths=[col_w] * ncols, repeatRows=1)
+
+    t = Table(flowable_rows, colWidths=col_widths, repeatRows=1)
     t.setStyle(BASE_TS)
     return t
 
@@ -408,6 +429,11 @@ def markdown_to_flowables(markdown_text):
         if stripped.startswith('#### '):
             story.append(Paragraph(stripped[5:].strip(), STY['h3']))
             story.append(Spacer(1, 3))
+            i += 1
+            continue
+
+        if stripped.startswith('# '):
+            story += _section_header(stripped[2:].strip())
             i += 1
             continue
 
@@ -710,7 +736,11 @@ def merge_reports(report1, report2, report3, report_type="Detailed"):
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
         if report_type == "Quick":
-            format_instruction = "Output ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet). Keep it concise for broker use."
+            format_instruction = """Output ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
+Section 2 must use TWO separate 2-column tables (Field | Value format):
+- Table 1: Business Info (Business Name, DBA, Owner, Bank, Account Type, Review Period)
+- Table 2: Financial Summary & Decision (Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days, Overdraft Fees, Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision)
+Do NOT create wide multi-column tables. Keep it concise for broker use."""
         else:
             format_instruction = "Keep Sections 0-11 format. The final report should read as a single cohesive professional document."
 
