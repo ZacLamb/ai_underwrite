@@ -50,10 +50,8 @@ TL      = HexColor('#B0BEC5')
 
 W_PAGE  = 7.0 * inch
 
-# ══════════════════════════════════════════════════════════════════
-# DETAILED PROMPTS — original working version, do not modify
-# ══════════════════════════════════════════════════════════════════
-SYSTEM_PROMPT_FULL = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
+# ── PROMPTS ────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
 
 IMPORTANT: Never mention any AI companies, models, tools, or technologies in your output. Present all findings as Fundara AI Underwriting analysis only.
 
@@ -92,7 +90,7 @@ OUTPUT ORDER
 10) Online Presence
 11) Failure & Scope"""
 
-USER_PROMPT_FULL = """Render a clean, print-ready underwriting report. Section 0 Decision Snapshot first (<=400 words), then Sections 1-11.
+USER_PROMPT = """Render a clean, print-ready underwriting report. Section 0 Decision Snapshot first (<=400 words), then Sections 1-11.
 - Markdown only; tables preferred; omit N/A rows; one blank line between sections.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
@@ -101,9 +99,6 @@ Here are the bank statements:
 
 {combined_text}"""
 
-# ══════════════════════════════════════════════════════════════════
-# QUICK PROMPTS — broker fast-decision version
-# ══════════════════════════════════════════════════════════════════
 SYSTEM_PROMPT_QUICK = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; MCA focus). Quick-scan mode. Extract only what is needed for a broker to make a fast funding decision. No approximations. If unparseable, state cause.
 
 IMPORTANT: Never mention any AI companies, models, tools, or technologies. Present all findings as Fundara AI Underwriting analysis only.
@@ -159,10 +154,9 @@ USER_PROMPT_QUICK = """Render a quick broker decision report with ONLY Section 0
 - Use ## for section headings and ### for table headings.
 - Section 0: bullet list format, concise.
 - Section 2: TWO separate 2-column tables (Field | Value). First table for business info, second for financials and decision.
-- Do NOT create a wide multi-column table — brokers need clean readable output.
+- Do NOT create a wide multi-column table.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
-- Keep it concise — brokers need fast decisions, not lengthy analysis.
 
 Here are the bank statements:
 
@@ -299,7 +293,6 @@ def _parse_table(table_lines):
         return None
     ncols = max(len(r) for r in rows)
 
-    # Give 2-column tables better proportions
     if ncols == 2:
         col_widths = [W_PAGE * 0.35, W_PAGE * 0.65]
     else:
@@ -482,7 +475,6 @@ def markdown_to_flowables(markdown_text):
             i += 1
             continue
 
-        # Catch unlabeled section/table headers
         if re.match(r'^(SECTION|TABLE)\s+\d+', stripped, re.IGNORECASE):
             story.append(Spacer(1, 8))
             story.append(Paragraph(stripped.rstrip(':'), STY['h2']))
@@ -568,8 +560,7 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
             story.append(logo_img_flow)
             story.append(Spacer(1, 0.18 * inch))
 
-        story.append(HRFlowable(width=W_PAGE, thickness=2,
-                                 color=LBLUE, spaceAfter=10))
+        story.append(HRFlowable(width=W_PAGE, thickness=2, color=LBLUE, spaceAfter=10))
         story.append(Paragraph(
             report_label,
             ParagraphStyle('cover_title', fontName='Helvetica-Bold',
@@ -578,8 +569,7 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
             'Powered by Fundara  |  Confidential',
             ParagraphStyle('cover_sub', fontName='Helvetica',
                            fontSize=10, textColor=TG, leading=14, spaceAfter=6)))
-        story.append(HRFlowable(width=W_PAGE, thickness=0.5,
-                                 color=BORDER, spaceAfter=16))
+        story.append(HRFlowable(width=W_PAGE, thickness=0.5, color=BORDER, spaceAfter=16))
         story.append(Spacer(1, 0.1 * inch))
 
         story += markdown_to_flowables(markdown_text)
@@ -684,7 +674,7 @@ def push_to_ghl(contact_id, report, api_key, pdf_url=""):
         return 500
 
 
-# ── AI ANALYSIS ─────────────────────────────────────────────────────
+# ── AI ──────────────────────────────────────────────────────────────
 def analyze_with_openai(combined_text, system_prompt, user_prompt):
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
@@ -694,7 +684,7 @@ def analyze_with_openai(combined_text, system_prompt, user_prompt):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt.format(combined_text=combined_text)}
             ],
-            "max_tokens": 8000
+            "max_tokens": 4000
         }
         r = requests.post("https://api.openai.com/v1/chat/completions",
                           json=payload, headers=headers, timeout=120)
@@ -714,7 +704,7 @@ def analyze_with_claude(combined_text, system_prompt, user_prompt):
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=8000,
+            max_tokens=4000,
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt.format(combined_text=combined_text)}]
         )
@@ -733,7 +723,7 @@ def analyze_with_grok(combined_text, system_prompt, user_prompt):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt.format(combined_text=combined_text)}
             ],
-            "max_tokens": 8000
+            "max_tokens": 4000
         }
         r = requests.post("https://api.x.ai/v1/chat/completions",
                           json=payload, headers=headers, timeout=120)
@@ -756,13 +746,12 @@ def merge_reports(report1, report2, report3, report_type="Detailed"):
             format_instruction = """Output ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
 Use ## for section headings and ### for table headings.
 Section 2 must use TWO separate 2-column tables (Field | Value format):
-- ### Table 1 - Business Info: (Business Name, DBA, Owner, Bank, Account Type, Review Period)
-- ### Table 2 - Financial Summary & Decision: (Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days, Overdraft Fees, Existing MCA Positions, Recommended Position, Recommended Factor Rate, Decision)
-Do NOT create wide multi-column tables. Keep it concise for broker use."""
+- ### Table 1 - Business Info
+- ### Table 2 - Financial Summary & Decision
+Do NOT create wide multi-column tables."""
         else:
             format_instruction = """Keep Sections 0-11 format.
-The final report should read as a single cohesive professional document.
-Use the most conservative figures when analyses disagree."""
+The final report should read as a single cohesive professional document."""
 
         merge_prompt = f"""You are a senior underwriting editor at Fundara. Merge these three underwriting analyses into ONE definitive report.
 
@@ -788,7 +777,7 @@ Produce the final merged Fundara underwriting report:"""
 
         message = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=8000,
+            max_tokens=4000,
             messages=[{"role": "user", "content": merge_prompt}]
         )
         return message.content[0].text
@@ -819,8 +808,8 @@ def analyze():
         system_prompt = SYSTEM_PROMPT_QUICK
         user_prompt = USER_PROMPT_QUICK
     else:
-        system_prompt = SYSTEM_PROMPT_FULL
-        user_prompt = USER_PROMPT_FULL
+        system_prompt = SYSTEM_PROMPT
+        user_prompt = USER_PROMPT
 
     statement_urls = []
     for i in range(1, 11):
