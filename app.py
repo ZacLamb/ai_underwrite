@@ -750,8 +750,18 @@ Section 2 must use TWO separate 2-column tables (Field | Value format):
 - ### Table 2 - Financial Summary & Decision
 Do NOT create wide multi-column tables."""
         else:
-            format_instruction = """Keep Sections 0-11 format.
-The final report should read as a single cohesive professional document."""
+    format_instruction = """Keep Sections 0-11 format using ## headings for each section.
+CRITICAL — this merge must produce an EXHAUSTIVE, FORENSIC-LEVEL report:
+- Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and a clear RECOMMENDATION line
+- Section 1: Scorecard must include a Notes column for EVERY criterion explaining WHY that score was given with specific evidence
+- Section 2: Deal Sheet must be a comprehensive two-column table — never leave fields as TBD or N/A without explanation
+- Section 3: Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days (<$100) for every month
+- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks with payee names and amounts, MCA position detail table
+- Section 7: Red Flags must be a severity-tagged table with columns: Severity, Flag, Evidence, Impact — flag SPECIFIC anomalies like identical check amounts, out-of-state addresses, round-trip transactions, MCA rebills disguised as deposits
+- Sections 8-11: Must contain substantive narrative, not placeholder text
+Use the most conservative figures across all three analyses.
+Name specific individuals, payees, and transaction patterns found in the statements.
+The final report must read like it was written by a 50-year veteran underwriter who read every line of every statement."""
 
         merge_prompt = f"""You are a senior underwriting editor at Fundara. Merge these three underwriting analyses into ONE definitive report.
 
