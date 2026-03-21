@@ -762,7 +762,6 @@ CRITICAL — this merge must produce an EXHAUSTIVE, FORENSIC-LEVEL report:
 Use the most conservative figures across all three analyses.
 Name specific individuals, payees, and transaction patterns found in the statements.
 The final report must read like it was written by a 50-year veteran underwriter who read every line of every statement."""
-
         merge_prompt = f"""You are a senior underwriting editor at Fundara. Merge these three underwriting analyses into ONE definitive report.
 
 IMPORTANT RULES:
