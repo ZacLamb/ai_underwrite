@@ -750,7 +750,7 @@ Section 2 must use TWO separate 2-column tables (Field | Value format):
 - ### Table 2 - Financial Summary & Decision
 Do NOT create wide multi-column tables."""
         else:
-    format_instruction = """Keep Sections 0-11 format using ## headings for each section.
+            format_instruction = """Keep Sections 0-11 format using ## headings for each section.
 CRITICAL — this merge must produce an EXHAUSTIVE, FORENSIC-LEVEL report:
 - Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and a clear RECOMMENDATION line
 - Section 1: Scorecard must include a Notes column for EVERY criterion explaining WHY that score was given with specific evidence
