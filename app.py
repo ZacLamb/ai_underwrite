@@ -6,9 +6,11 @@ import json
 import requests
 import pdfplumber
 import boto3
+import psycopg2
 
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
+from psycopg2.extras import RealDictCursor
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -24,7 +26,6 @@ from reportlab.platypus import (
     TableStyle,
     KeepTogether,
 )
-from reportlab.lib import colors
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
@@ -41,7 +42,18 @@ R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID")
 R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")
 R2_BUCKET = os.environ.get("R2_BUCKET", "fundara-reports")
 
-LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+OPENAI_INPUT_PER_M = float(os.environ.get("OPENAI_INPUT_PER_M", "2.00"))
+OPENAI_OUTPUT_PER_M = float(os.environ.get("OPENAI_OUTPUT_PER_M", "8.00"))
+
+ANTHROPIC_INPUT_PER_M = float(os.environ.get("ANTHROPIC_INPUT_PER_M", "3.00"))
+ANTHROPIC_OUTPUT_PER_M = float(os.environ.get("ANTHROPIC_OUTPUT_PER_M", "15.00"))
+
+GROK_INPUT_PER_M = float(os.environ.get("GROK_INPUT_PER_M", "0.00"))
+GROK_OUTPUT_PER_M = float(os.environ.get("GROK_OUTPUT_PER_M", "0.00"))
+
+LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69bdb2b44865cdd2954821be.png"
 
 # ── PALETTE ─────────────────────────────────────────────────────────
 BG = HexColor("#0D1B2A")
@@ -456,8 +468,8 @@ def convert_to_pdf(markdown_text):
         try:
             logo_resp = requests.get(LOGO_URL, timeout=15)
             if logo_resp.status_code == 200:
-                logo_img_draw = Image(io.BytesIO(logo_resp.content), width=1.6 * inch, height=0.38 * inch)
-                logo_img_flow = Image(io.BytesIO(logo_resp.content), width=2.4 * inch, height=0.56 * inch)
+                logo_img_draw = Image(io.BytesIO(logo_resp.content), width=2.1 * inch, height=0.5 * inch)
+                logo_img_flow = Image(io.BytesIO(logo_resp.content), width=3.0 * inch, height=0.72 * inch)
                 logo_img_flow.hAlign = "LEFT"
         except Exception as logo_err:
             print(f"Logo load error: {logo_err}")
@@ -477,6 +489,10 @@ def convert_to_pdf(markdown_text):
         story.append(Paragraph(
             "Powered by Fundara  |  Confidential",
             ParagraphStyle("cover_sub", fontName="Helvetica", fontSize=10, textColor=TG, leading=14, spaceAfter=6),
+        ))
+        story.append(Paragraph(
+            "fundara.co",
+            ParagraphStyle("cover_brand", fontName="Helvetica-Bold", fontSize=11, textColor=LBLUE, leading=14),
         ))
         story.append(HRFlowable(width=W_PAGE, thickness=0.5, color=BORDER, spaceAfter=16))
         story.append(Spacer(1, 0.1 * inch))
@@ -557,6 +573,168 @@ def extract_text(pdf_bytes):
     except Exception as extract_err:
         print(f"Extract error: {extract_err}")
         return ""
+
+# ── DB / COST HELPERS ──────────────────────────────────────────────
+def calc_cost(input_tokens, output_tokens, input_rate_per_m, output_rate_per_m):
+    return round(
+        ((input_tokens / 1_000_000) * input_rate_per_m) +
+        ((output_tokens / 1_000_000) * output_rate_per_m),
+        6
+    )
+
+
+def get_db_conn():
+    if not DATABASE_URL:
+        return None
+    return psycopg2.connect(DATABASE_URL)
+
+
+def init_db():
+    if not DATABASE_URL:
+        print("DATABASE_URL not set, skipping DB init")
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS underwriting_runs (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                location_id TEXT,
+                contact_id TEXT,
+                report_type TEXT,
+                openai_prompt_tokens INTEGER DEFAULT 0,
+                openai_completion_tokens INTEGER DEFAULT 0,
+                openai_cost NUMERIC(12,6) DEFAULT 0,
+                claude_input_tokens INTEGER DEFAULT 0,
+                claude_output_tokens INTEGER DEFAULT 0,
+                claude_cost NUMERIC(12,6) DEFAULT 0,
+                grok_prompt_tokens INTEGER DEFAULT 0,
+                grok_completion_tokens INTEGER DEFAULT 0,
+                grok_cost NUMERIC(12,6) DEFAULT 0,
+                final_revision_input_tokens INTEGER DEFAULT 0,
+                final_revision_output_tokens INTEGER DEFAULT 0,
+                final_revision_cost NUMERIC(12,6) DEFAULT 0,
+                total_cost NUMERIC(12,6) DEFAULT 0,
+                pdf_url TEXT
+            );
+        """)
+        conn.commit()
+        cur.close()
+        print("underwriting_runs table ready")
+    except Exception as e:
+        print(f"DB init error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url=""):
+    if not DATABASE_URL:
+        print("DATABASE_URL not set, skipping save_run_cost")
+        return
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO underwriting_runs (
+                location_id,
+                contact_id,
+                report_type,
+                openai_prompt_tokens,
+                openai_completion_tokens,
+                openai_cost,
+                claude_input_tokens,
+                claude_output_tokens,
+                claude_cost,
+                grok_prompt_tokens,
+                grok_completion_tokens,
+                grok_cost,
+                final_revision_input_tokens,
+                final_revision_output_tokens,
+                final_revision_cost,
+                total_cost,
+                pdf_url
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            location_id,
+            contact_id,
+            report_type,
+            cost_data.get("openai_prompt_tokens", 0),
+            cost_data.get("openai_completion_tokens", 0),
+            cost_data.get("openai_cost", 0),
+            cost_data.get("claude_input_tokens", 0),
+            cost_data.get("claude_output_tokens", 0),
+            cost_data.get("claude_cost", 0),
+            cost_data.get("grok_prompt_tokens", 0),
+            cost_data.get("grok_completion_tokens", 0),
+            cost_data.get("grok_cost", 0),
+            cost_data.get("final_revision_input_tokens", 0),
+            cost_data.get("final_revision_output_tokens", 0),
+            cost_data.get("final_revision_cost", 0),
+            cost_data.get("total_cost", 0),
+            pdf_url
+        ))
+        conn.commit()
+        cur.close()
+        print(f"Saved run cost for location_id={location_id}")
+    except Exception as e:
+        print(f"save_run_cost error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_monthly_cost_summary(month=None):
+    if not DATABASE_URL:
+        return {"error": "DATABASE_URL not set"}
+
+    conn = None
+    try:
+        conn = get_db_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        if month:
+            month_start = f"{month}-01"
+            cur.execute("""
+                SELECT
+                    location_id,
+                    report_type,
+                    COUNT(*) AS runs,
+                    ROUND(COALESCE(SUM(total_cost), 0)::numeric, 6) AS total_cost,
+                    ROUND(COALESCE(AVG(total_cost), 0)::numeric, 6) AS avg_cost
+                FROM underwriting_runs
+                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', %s::date)
+                GROUP BY location_id, report_type
+                ORDER BY location_id, report_type
+            """, (month_start,))
+        else:
+            cur.execute("""
+                SELECT
+                    location_id,
+                    report_type,
+                    COUNT(*) AS runs,
+                    ROUND(COALESCE(SUM(total_cost), 0)::numeric, 6) AS total_cost,
+                    ROUND(COALESCE(AVG(total_cost), 0)::numeric, 6) AS avg_cost
+                FROM underwriting_runs
+                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+                GROUP BY location_id, report_type
+                ORDER BY location_id, report_type
+            """)
+
+        rows = cur.fetchall()
+        cur.close()
+        return rows
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        if conn:
+            conn.close()
 
 # ── PROMPTS ────────────────────────────────────────────────────────
 DETAILED_SYSTEM_PROMPT = """ROLE: You are a senior commercial underwriter at Fundara with 50 years of experience reviewing small-business bank statements, especially construction, trades, restaurants, trucking, and MCA-heavy files.
@@ -796,7 +974,23 @@ def analyze_with_openai(combined_text, report_type):
             print(f"OpenAI error response: {data}")
             return None
 
-        return data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        cost = calc_cost(
+            prompt_tokens,
+            completion_tokens,
+            OPENAI_INPUT_PER_M,
+            OPENAI_OUTPUT_PER_M
+        )
+
+        return {
+            "content": data["choices"][0]["message"]["content"],
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost": cost,
+            "provider": "openai",
+        }
     except Exception as openai_err:
         print(f"OpenAI exception: {openai_err}")
         return None
@@ -814,7 +1008,23 @@ def analyze_with_claude(combined_text, report_type):
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt_template.format(combined_text=combined_text)}],
         )
-        return message.content[0].text
+
+        input_tokens = getattr(message.usage, "input_tokens", 0)
+        output_tokens = getattr(message.usage, "output_tokens", 0)
+        cost = calc_cost(
+            input_tokens,
+            output_tokens,
+            ANTHROPIC_INPUT_PER_M,
+            ANTHROPIC_OUTPUT_PER_M
+        )
+
+        return {
+            "content": message.content[0].text,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+            "provider": "claude",
+        }
     except Exception as claude_err:
         print(f"Claude exception: {claude_err}")
         return None
@@ -851,22 +1061,39 @@ def analyze_with_grok(combined_text, report_type):
             print(f"Grok error response: {data}")
             return None
 
-        return data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        cost = calc_cost(
+            prompt_tokens,
+            completion_tokens,
+            GROK_INPUT_PER_M,
+            GROK_OUTPUT_PER_M
+        )
+
+        return {
+            "content": data["choices"][0]["message"]["content"],
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cost": cost,
+            "provider": "grok",
+        }
     except Exception as grok_err:
         print(f"Grok exception: {grok_err}")
         return None
 
 
 def choose_base_report(results):
-    ordered = [
-        results.get("claude"),
-        results.get("openai"),
-        results.get("grok"),
-    ]
-    valid = [r for r in ordered if r and isinstance(r, str) and len(r.strip()) > 100]
-    if not valid:
+    candidates = []
+    for key in ("claude", "openai", "grok"):
+        item = results.get(key)
+        if item and item.get("content") and len(item["content"].strip()) > 100:
+            candidates.append(item)
+
+    if not candidates:
         return None
-    return max(valid, key=len)
+
+    return max(candidates, key=lambda x: len(x["content"]))
 
 
 def revise_final_with_claude(base_report, report2, report3, report_type):
@@ -889,7 +1116,6 @@ YOUR JOB
 
 NON-NEGOTIABLE RULES
 - Do not mention AI, tools, models, or drafting process
-- Do not average away sharp underwriting judgment
 - If reviewers disagree, choose the most conservative supportable figure
 - Do not weaken recommendation language
 - The final result must be as complete or better than the base report, never worse
@@ -947,10 +1173,31 @@ Return the final revised DETAILED Fundara underwriting report now.
             max_tokens=max_tokens,
             messages=[{"role": "user", "content": revision_prompt}],
         )
-        return message.content[0].text
+
+        input_tokens = getattr(message.usage, "input_tokens", 0)
+        output_tokens = getattr(message.usage, "output_tokens", 0)
+        cost = calc_cost(
+            input_tokens,
+            output_tokens,
+            ANTHROPIC_INPUT_PER_M,
+            ANTHROPIC_OUTPUT_PER_M
+        )
+
+        return {
+            "content": message.content[0].text,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+        }
+
     except Exception as merge_err:
         print(f"Final revision exception: {merge_err}")
-        return base_report
+        return {
+            "content": base_report,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost": 0,
+        }
 
 
 def generate_multi_model_report(combined_text, report_type):
@@ -971,21 +1218,52 @@ def generate_multi_model_report(combined_text, report_type):
                 print(f"{key} future failed: {err}")
                 results[key] = None
 
-    base_report = choose_base_report(results)
-    if not base_report:
-        return None, results
+    base_item = choose_base_report(results)
+    if not base_item:
+        return None, results, {}
+
+    base_report = base_item["content"]
 
     others = []
     for key in ("claude", "openai", "grok"):
-        val = results.get(key)
-        if val and val != base_report:
-            others.append(val)
+        item = results.get(key)
+        if item and item.get("content") and item["content"] != base_report:
+            others.append(item["content"])
 
     reviewer2 = others[0] if len(others) > 0 else None
     reviewer3 = others[1] if len(others) > 1 else None
 
-    final_report = revise_final_with_claude(base_report, reviewer2, reviewer3, report_type)
-    return final_report, results
+    final_revision = revise_final_with_claude(base_report, reviewer2, reviewer3, report_type)
+
+    cost_data = {
+        "openai_prompt_tokens": (results.get("openai") or {}).get("prompt_tokens", 0),
+        "openai_completion_tokens": (results.get("openai") or {}).get("completion_tokens", 0),
+        "openai_cost": (results.get("openai") or {}).get("cost", 0),
+
+        "claude_input_tokens": (results.get("claude") or {}).get("input_tokens", 0),
+        "claude_output_tokens": (results.get("claude") or {}).get("output_tokens", 0),
+        "claude_cost": (results.get("claude") or {}).get("cost", 0),
+
+        "grok_prompt_tokens": (results.get("grok") or {}).get("prompt_tokens", 0),
+        "grok_completion_tokens": (results.get("grok") or {}).get("completion_tokens", 0),
+        "grok_cost": (results.get("grok") or {}).get("cost", 0),
+
+        "final_revision_input_tokens": final_revision.get("input_tokens", 0),
+        "final_revision_output_tokens": final_revision.get("output_tokens", 0),
+        "final_revision_cost": final_revision.get("cost", 0),
+    }
+
+    cost_data["total_cost"] = round(
+        cost_data["openai_cost"] +
+        cost_data["claude_cost"] +
+        cost_data["grok_cost"] +
+        cost_data["final_revision_cost"],
+        6
+    )
+
+    print(f"RUN COSTS: {json.dumps(cost_data)}")
+
+    return final_revision["content"], results, cost_data
 
 # ── GHL PUSH ───────────────────────────────────────────────────────
 def push_to_ghl(contact_id, report, api_key, pdf_url=""):
@@ -1015,6 +1293,7 @@ def analyze():
     try:
         data = request.json or {}
         contact_id = data.get("contact_id")
+        location_id = data.get("location_id")
         ghl_key = data.get("ghl_api_key") or GHL_API_KEY
 
         raw_report_type = (data.get("report_type") or "").strip().lower()
@@ -1046,7 +1325,7 @@ def analyze():
             return jsonify({"error": "Could not extract text from any PDFs"}), 400
 
         print(f"Generating {report_type} report")
-        final_report, model_results = generate_multi_model_report(combined_text, report_type)
+        final_report, model_results, cost_data = generate_multi_model_report(combined_text, report_type)
 
         if not final_report:
             return jsonify({
@@ -1060,6 +1339,7 @@ def analyze():
         if pdf_bytes:
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
+        save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url)
         status = push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
 
         return jsonify({
@@ -1067,7 +1347,9 @@ def analyze():
             "report_type": report_type,
             "ghl_update_status": status,
             "contact_id": contact_id,
+            "location_id": location_id,
             "pdf_url": pdf_url,
+            "cost_data": cost_data,
         })
     except Exception as e:
         print(f"/analyze fatal error: {e}")
@@ -1078,6 +1360,15 @@ def analyze():
 def health():
     return jsonify({"status": "running"})
 
+
+@app.route("/cost-summary", methods=["GET"])
+def cost_summary():
+    month = request.args.get("month")  # format: YYYY-MM
+    summary = get_monthly_cost_summary(month=month)
+    return jsonify(summary)
+
+
+init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
