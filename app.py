@@ -7,13 +7,10 @@ import requests
 import pdfplumber
 import boto3
 import psycopg2
-import gspread
 
-from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from anthropic import Anthropic
 from psycopg2.extras import RealDictCursor
-from google.oauth2.service_account import Credentials
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -46,17 +43,17 @@ R2_PUBLIC_URL = os.environ.get("R2_PUBLIC_URL")
 R2_BUCKET = os.environ.get("R2_BUCKET", "fundara-reports")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
-
-GOOGLE_SHEETS_SPREADSHEET_ID = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID")
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+GSHEET_WEBHOOK_URL = os.environ.get("GSHEET_WEBHOOK_URL")
 
 LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69bdb2b44865cdd2954821be.png"
+
 
 def env_float(name, default):
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return float(default)
     return float(raw)
+
 
 OPENAI_INPUT_PER_M = env_float("OPENAI_INPUT_PER_M", 2.00)
 OPENAI_OUTPUT_PER_M = env_float("OPENAI_OUTPUT_PER_M", 8.00)
@@ -118,6 +115,7 @@ def build_styles():
     ps("td_y", fontName="Helvetica-Bold", fontSize=8, textColor=YELLOW, leading=11)
     ps("td_o", fontName="Helvetica-Bold", fontSize=8, textColor=ORANGE, leading=11)
     return s
+
 
 STY = build_styles()
 
@@ -747,64 +745,38 @@ def get_monthly_cost_summary(month=None):
         if conn:
             conn.close()
 
-# ── GOOGLE SHEETS HELPERS ──────────────────────────────────────────
-def get_gsheet_client():
-    if not GOOGLE_SERVICE_ACCOUNT_JSON:
-        print("GOOGLE_SERVICE_ACCOUNT_JSON not set")
-        return None
-
-    try:
-        service_account_info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
-        creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        print(f"Google Sheets auth error: {e}")
-        return None
-
-
-def append_run_to_gsheet(location_id, contact_id, report_type, cost_data, pdf_url=""):
-    if not GOOGLE_SHEETS_SPREADSHEET_ID:
-        print("GOOGLE_SHEETS_SPREADSHEET_ID not set, skipping sheet append")
+# ── GOOGLE SHEET WEBHOOK ───────────────────────────────────────────
+def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url=""):
+    if not GSHEET_WEBHOOK_URL:
+        print("GSHEET_WEBHOOK_URL not set, skipping Google Sheet webhook")
         return
 
-    client = get_gsheet_client()
-    if not client:
-        print("Google Sheets client unavailable, skipping sheet append")
-        return
+    payload = {
+        "location_id": location_id or "",
+        "contact_id": contact_id or "",
+        "report_type": report_type or "",
+        "total_cost": cost_data.get("total_cost", 0),
+        "pdf_url": pdf_url or "",
+        "openai_prompt_tokens": cost_data.get("openai_prompt_tokens", 0),
+        "openai_completion_tokens": cost_data.get("openai_completion_tokens", 0),
+        "openai_cost": cost_data.get("openai_cost", 0),
+        "claude_input_tokens": cost_data.get("claude_input_tokens", 0),
+        "claude_output_tokens": cost_data.get("claude_output_tokens", 0),
+        "claude_cost": cost_data.get("claude_cost", 0),
+        "grok_prompt_tokens": cost_data.get("grok_prompt_tokens", 0),
+        "grok_completion_tokens": cost_data.get("grok_completion_tokens", 0),
+        "grok_cost": cost_data.get("grok_cost", 0),
+        "final_revision_input_tokens": cost_data.get("final_revision_input_tokens", 0),
+        "final_revision_output_tokens": cost_data.get("final_revision_output_tokens", 0),
+        "final_revision_cost": cost_data.get("final_revision_cost", 0),
+    }
 
     try:
-        spreadsheet = client.open_by_key(GOOGLE_SHEETS_SPREADSHEET_ID)
-        worksheet = spreadsheet.worksheet("underwriting_runs")
-
-        row = [
-            datetime.now(timezone.utc).isoformat(),
-            location_id or "",
-            contact_id or "",
-            report_type or "",
-            cost_data.get("openai_prompt_tokens", 0),
-            cost_data.get("openai_completion_tokens", 0),
-            cost_data.get("openai_cost", 0),
-            cost_data.get("claude_input_tokens", 0),
-            cost_data.get("claude_output_tokens", 0),
-            cost_data.get("claude_cost", 0),
-            cost_data.get("grok_prompt_tokens", 0),
-            cost_data.get("grok_completion_tokens", 0),
-            cost_data.get("grok_cost", 0),
-            cost_data.get("final_revision_input_tokens", 0),
-            cost_data.get("final_revision_output_tokens", 0),
-            cost_data.get("final_revision_cost", 0),
-            cost_data.get("total_cost", 0),
-            pdf_url or "",
-        ]
-
-        worksheet.append_row(row, value_input_option="USER_ENTERED")
-        print(f"Appended billing row to Google Sheets for location_id={location_id}")
+        r = requests.post(GSHEET_WEBHOOK_URL, json=payload, timeout=20)
+        print(f"Google Sheet webhook status: {r.status_code}")
+        print(f"Google Sheet webhook response: {r.text}")
     except Exception as e:
-        print(f"append_run_to_gsheet error: {e}")
+        print(f"Google Sheet webhook error: {e}")
 
 # ── PROMPTS ────────────────────────────────────────────────────────
 DETAILED_SYSTEM_PROMPT = """ROLE: You are a senior commercial underwriter at Fundara with 50 years of experience reviewing small-business bank statements, especially construction, trades, restaurants, trucking, and MCA-heavy files.
@@ -1410,7 +1382,7 @@ def analyze():
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
         save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url)
-        append_run_to_gsheet(location_id, contact_id, report_type, cost_data, pdf_url)
+        send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url)
         status = push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
 
         return jsonify({
