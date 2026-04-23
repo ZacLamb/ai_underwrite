@@ -764,7 +764,6 @@ def classify_provider_status(results, final_revision):
 
     openai_cost = openai_item.get("cost", 0) or 0
     claude_cost = claude_item.get("cost", 0) or 0
-    grok_cost = grok_item.get("cost", 0) or 0
 
     if openai_ok and claude_ok and grok_ok and revision_ok:
         return "full_success", "OpenAI, Claude, Grok, and final Claude revision all contributed successfully."
@@ -1404,15 +1403,36 @@ def analyze():
 
         combined_text = ""
         for idx, url in statement_urls:
+            print(f"Statement {idx} URL: {url}")
             print(f"Downloading statement {idx}")
+
             pdf_bytes = download_pdf(url, ghl_key)
-            if pdf_bytes:
-                print(f"Extracting statement {idx}")
-                text = extract_text(pdf_bytes)
-                if text.strip():
-                    combined_text += f"\n--- BANK STATEMENT {idx} ---\n{text}\n"
+
+            if not pdf_bytes:
+                print(f"Statement {idx} failed to download or returned no bytes")
+                continue
+
+            print(f"Statement {idx} downloaded successfully, bytes={len(pdf_bytes)}")
+            print(f"Extracting statement {idx}")
+
+            text = extract_text(pdf_bytes)
+
+            if not text:
+                print(f"Statement {idx} extract_text returned empty or None")
+                continue
+
+            extracted_len = len(text.strip())
+            print(f"Statement {idx} extracted chars={extracted_len}")
+
+            if extracted_len == 0:
+                print(f"Statement {idx} had no extractable text after stripping")
+                continue
+
+            print(f"Statement {idx} added to combined_text")
+            combined_text += f"\n--- BANK STATEMENT {idx} ---\n{text}\n"
 
         if not combined_text.strip():
+            print("No extractable text was found in any provided bank statements")
             return jsonify({"error": "Could not extract text from any PDFs"}), 400
 
         print(f"Generating {report_type} report")
