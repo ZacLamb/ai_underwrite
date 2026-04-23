@@ -3,7 +3,6 @@ import io
 import re
 import uuid
 import json
-import time
 import requests
 import pdfplumber
 import boto3
@@ -27,7 +26,7 @@ from reportlab.platypus import (
     TableStyle,
     KeepTogether,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 app = Flask(__name__)
 
@@ -45,13 +44,8 @@ R2_BUCKET = os.environ.get("R2_BUCKET", "fundara-reports")
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 GSHEET_WEBHOOK_URL = os.environ.get("GSHEET_WEBHOOK_URL")
-ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL")
 
 LOGO_URL = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69bdb2b44865cdd2954821be.png"
-
-DOWNLOAD_RETRIES = int(os.environ.get("DOWNLOAD_RETRIES", "3"))
-DOWNLOAD_TIMEOUT = int(os.environ.get("DOWNLOAD_TIMEOUT", "30"))
-MODEL_TIMEOUT = int(os.environ.get("MODEL_TIMEOUT", "75"))
 
 
 def env_float(name, default):
@@ -259,6 +253,52 @@ def _section_header(title):
     ]
 
 
+def _flag_card(severity, title, detail):
+    sev_map = {"CRITICAL": RED, "HIGH": ORANGE, "MEDIUM": YELLOW, "LOW": GREEN}
+    sc = sev_map.get(severity.upper(), TG)
+
+    badge = Table(
+        [[Paragraph(
+            severity.upper(),
+            ParagraphStyle("fb", fontName="Helvetica-Bold", fontSize=7, textColor=BG, alignment=TA_CENTER),
+        )]],
+        colWidths=[0.65 * inch],
+    )
+    badge.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), sc),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+
+    content = Table([
+        [Paragraph(
+            f"<b>{_parse_md_bold(title)}</b>",
+            ParagraphStyle("ft", fontName="Helvetica-Bold", fontSize=9, textColor=TW, leading=12),
+        )],
+        [Spacer(1, 3)],
+        [Paragraph(_parse_md_bold(detail), STY["body"])],
+    ], colWidths=[6.1 * inch])
+    content.setStyle(TableStyle([
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+    ]))
+
+    card = Table([[badge, content]], colWidths=[0.7 * inch, 6.3 * inch])
+    card.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), CARD),
+        ("BOX", (0, 0), (-1, -1), 0.35, BORDER),
+        ("LINEBEFORE", (0, 0), (0, -1), 4, sc),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (1, 0), (1, 0), 10),
+        ("RIGHTPADDING", (1, 0), (1, 0), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    return KeepTogether([card, Spacer(1, 5)])
+
+
 def _decision_banner(text):
     u = text.upper()
     is_decline = "DECLINE" in u
@@ -346,6 +386,67 @@ def markdown_to_flowables(markdown_text):
             story.append(Spacer(1, 6))
             story.append(_decision_banner(f"RECOMMENDATION: {rec_match.group(1).upper()}"))
             story.append(Spacer(1, 10))
+            i += 1
+            continue
+
+        if stripped in ("---", "***", "___"):
+            story.append(HRFlowable(width=W_PAGE, thickness=0.4, color=BORDER))
+            story.append(Spacer(1, 5))
+            i += 1
+            continue
+
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            text = _parse_md_bold(stripped[2:])
+            flag_match = re.match(
+                r"\*\*(CRITICAL|HIGH|MEDIUM|LOW)\*\*[:\s–-]+(.+?)(?:[–-]+|:)(.+)",
+                stripped[2:],
+                re.IGNORECASE,
+            )
+            if flag_match:
+                sev, ftitle, fdetail = flag_match.groups()
+                story.append(_flag_card(sev, ftitle.strip(), fdetail.strip()))
+                i += 1
+                continue
+
+            story.append(Paragraph(f"• {text}", STY["bullet"]))
+            story.append(Spacer(1, 2))
+            i += 1
+            continue
+
+        num_match = re.match(r"^(\d+)\.\s+(.+)", stripped)
+        if num_match:
+            num, text = num_match.groups()
+            story.append(Paragraph(f"<b>{num}.</b>  {_parse_md_bold(text)}", STY["bullet"]))
+            story.append(Spacer(1, 2))
+            i += 1
+            continue
+
+        bold_only = re.match(r"^\*\*(.+)\*\*$", stripped)
+        if bold_only:
+            story.append(Paragraph(f"<b>{bold_only.group(1)}</b>", STY["body_b"]))
+            story.append(Spacer(1, 3))
+            i += 1
+            continue
+
+        kv_match = re.match(r"^\*\*(.+?)\*\*[:\s]+(.+)", stripped)
+        if kv_match:
+            key, val = kv_match.groups()
+            val_clean = _parse_md_bold(val)
+            val_upper = val.upper()
+            if any(k in val_upper for k in ("DECLINE", "NEGATIVE", "CRITICAL", "FAILED")):
+                val_markup = f'<font color="#E53935"><b>{val_clean}</b></font>'
+            elif any(k in val_upper for k in ("HIGH RISK", "UNSUSTAINABLE", "OVERDRAFT")):
+                val_markup = f'<font color="#F57C00"><b>{val_clean}</b></font>'
+            elif any(k in val_upper for k in ("APPROVE", "PASS", "LOW RISK", "CONDITIONAL APPROVAL")):
+                val_markup = f'<font color="#43A047"><b>{val_clean}</b></font>'
+            else:
+                val_markup = val_clean
+
+            story.append(Paragraph(
+                f'<b><font color="#90A4AE">{key}:</font></b>  {val_markup}',
+                STY["body"],
+            ))
+            story.append(Spacer(1, 3))
             i += 1
             continue
 
@@ -446,7 +547,7 @@ def upload_to_r2(pdf_bytes, contact_id):
             Bucket=R2_BUCKET,
             Key=filename,
             Body=pdf_bytes,
-            ContentType="application/pdf"
+            ContentType="application/pdf",
         )
         url = f"{R2_PUBLIC_URL}/{filename}"
         print(f"PDF uploaded to R2: {url}")
@@ -456,42 +557,17 @@ def upload_to_r2(pdf_bytes, contact_id):
         return None
 
 
-def is_probably_pdf(pdf_bytes):
-    return bool(pdf_bytes and pdf_bytes[:5] == b"%PDF-")
-
-
 def download_pdf(url, api_key):
-    if not url or str(url).strip().lower() in {"undefined", "null", ""}:
-        print(f"Skipping invalid statement URL: {url}")
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        response = requests.get(url, headers=headers, timeout=45)
+        if response.status_code == 200:
+            return response.content
+        print(f"Failed to download PDF: {response.status_code}")
         return None
-
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-
-    for attempt in range(1, DOWNLOAD_RETRIES + 1):
-        try:
-            response = requests.get(url, headers=headers, timeout=DOWNLOAD_TIMEOUT)
-            if response.status_code != 200:
-                print(f"Failed to download PDF (attempt {attempt}): {response.status_code} | {url}")
-                continue
-
-            pdf_bytes = response.content
-            if not is_probably_pdf(pdf_bytes):
-                print(f"Downloaded file is not a valid PDF header (attempt {attempt}) | {url}")
-                return None
-
-            return pdf_bytes
-
-        except requests.exceptions.ReadTimeout as e:
-            print(f"Download timeout attempt {attempt}/{DOWNLOAD_RETRIES}: {e}")
-            if attempt < DOWNLOAD_RETRIES:
-                time.sleep(2 * attempt)
-        except Exception as download_err:
-            print(f"Download error attempt {attempt}/{DOWNLOAD_RETRIES}: {download_err}")
-            if attempt < DOWNLOAD_RETRIES:
-                time.sleep(1 * attempt)
-
-    print(f"Giving up on download after {DOWNLOAD_RETRIES} attempts: {url}")
-    return None
+    except Exception as download_err:
+        print(f"Download error: {download_err}")
+        return None
 
 
 def extract_text(pdf_bytes):
@@ -554,10 +630,6 @@ def init_db():
                 pdf_url TEXT
             );
         """)
-        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS run_status TEXT;""")
-        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS run_reason TEXT;""")
-        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS provider_status TEXT;""")
-        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS provider_reason TEXT;""")
         conn.commit()
         cur.close()
         print("underwriting_runs table ready")
@@ -568,7 +640,7 @@ def init_db():
             conn.close()
 
 
-def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url="", run_status="", run_reason="", provider_status="", provider_reason=""):
+def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url=""):
     if not DATABASE_URL:
         print("DATABASE_URL not set, skipping save_run_cost")
         return
@@ -595,13 +667,9 @@ def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url="", r
                 final_revision_output_tokens,
                 final_revision_cost,
                 total_cost,
-                pdf_url,
-                run_status,
-                run_reason,
-                provider_status,
-                provider_reason
+                pdf_url
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             location_id,
             contact_id,
@@ -619,97 +687,66 @@ def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url="", r
             cost_data.get("final_revision_output_tokens", 0),
             cost_data.get("final_revision_cost", 0),
             cost_data.get("total_cost", 0),
-            pdf_url,
-            run_status,
-            run_reason,
-            provider_status,
-            provider_reason
+            pdf_url
         ))
         conn.commit()
         cur.close()
-        print(f"Saved run cost for location_id={location_id} with status={run_status}")
+        print(f"Saved run cost for location_id={location_id}")
     except Exception as e:
         print(f"save_run_cost error: {e}")
     finally:
         if conn:
             conn.close()
 
-# ── STATUS / ALERT HELPERS ─────────────────────────────────────────
-def classify_run(results, final_revision):
-    openai_item = results.get("openai") or {}
-    claude_item = results.get("claude") or {}
-    grok_item = results.get("grok") or {}
 
-    openai_ok = bool(openai_item.get("content"))
-    claude_ok = bool(claude_item.get("content"))
-    grok_ok = bool(grok_item.get("content"))
-    revision_ok = bool(final_revision.get("content")) and final_revision.get("input_tokens", 0) > 0
+def get_monthly_cost_summary(month=None):
+    if not DATABASE_URL:
+        return {"error": "DATABASE_URL not set"}
 
-    if grok_ok and not openai_ok and not claude_ok:
-        return "grok_only", "OpenAI and Claude failed; Grok carried the run."
-    if grok_ok and openai_ok and not claude_ok:
-        return "claude_failed", "Claude failed; OpenAI and Grok still contributed."
-    if grok_ok and claude_ok and not openai_ok:
-        return "openai_failed", "OpenAI failed; Claude and Grok still contributed."
-    if openai_ok and claude_ok and not revision_ok:
-        return "final_revision_skipped", "Final Claude revision failed; base report was used."
-    if not openai_ok and not claude_ok and not grok_ok:
-        return "all_models_failed", "No model returned usable content."
-    if openai_ok and claude_ok and grok_ok and revision_ok:
-        return "full_success", "All model stages contributed successfully."
-    return "partial_success", "The run completed with one or more degraded model stages."
-
-
-def classify_provider_state(results):
-    openai_item = results.get("openai") or {}
-    claude_item = results.get("claude") or {}
-    grok_item = results.get("grok") or {}
-
-    openai_error = str(openai_item.get("error_message", "")).lower()
-    claude_error = str(claude_item.get("error_message", "")).lower()
-    grok_ok = bool(grok_item.get("content"))
-
-    openai_quota = "insufficient_quota" in openai_error or "429" in openai_error
-    claude_credits = "credit balance is too low" in claude_error
-
-    if openai_quota and claude_credits and grok_ok:
-        return "grok_only_fallback", "Anthropic out of credits and OpenAI quota exceeded; Grok completed the run."
-    if claude_credits and openai_quota:
-        return "dual_provider_failure", "Anthropic credits depleted and OpenAI quota exceeded."
-    if claude_credits:
-        return "anthropic_out_of_credits", "Claude failed due to low API credits."
-    if openai_quota:
-        return "openai_quota_exceeded", "OpenAI failed due to quota/billing limits."
-    return "full_stack_ok", "Primary providers available."
-
-
-def send_backend_alert(location_id, contact_id, report_type, run_status, run_reason, provider_status, provider_reason, pdf_url=""):
-    if not ALERT_WEBHOOK_URL:
-        return
-
-    if run_status == "full_success" and provider_status == "full_stack_ok":
-        return
-
-    payload = {
-        "location_id": location_id or "",
-        "contact_id": contact_id or "",
-        "report_type": report_type or "",
-        "run_status": run_status,
-        "run_reason": run_reason,
-        "provider_status": provider_status,
-        "provider_reason": provider_reason,
-        "pdf_url": pdf_url or "",
-        "message": f"AI Underwriter alert | {run_status} | {provider_status} | {run_reason} | {provider_reason}"
-    }
-
+    conn = None
     try:
-        r = requests.post(ALERT_WEBHOOK_URL, json=payload, timeout=15)
-        print(f"Backend alert status: {r.status_code}")
+        conn = get_db_conn()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+
+        if month:
+            month_start = f"{month}-01"
+            cur.execute("""
+                SELECT
+                    location_id,
+                    report_type,
+                    COUNT(*) AS runs,
+                    ROUND(COALESCE(SUM(total_cost), 0)::numeric, 6) AS total_cost,
+                    ROUND(COALESCE(AVG(total_cost), 0)::numeric, 6) AS avg_cost
+                FROM underwriting_runs
+                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', %s::date)
+                GROUP BY location_id, report_type
+                ORDER BY location_id, report_type
+            """, (month_start,))
+        else:
+            cur.execute("""
+                SELECT
+                    location_id,
+                    report_type,
+                    COUNT(*) AS runs,
+                    ROUND(COALESCE(SUM(total_cost), 0)::numeric, 6) AS total_cost,
+                    ROUND(COALESCE(AVG(total_cost), 0)::numeric, 6) AS avg_cost
+                FROM underwriting_runs
+                WHERE DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
+                GROUP BY location_id, report_type
+                ORDER BY location_id, report_type
+            """)
+
+        rows = cur.fetchall()
+        cur.close()
+        return rows
     except Exception as e:
-        print(f"Backend alert error: {e}")
+        return {"error": str(e)}
+    finally:
+        if conn:
+            conn.close()
 
 # ── GOOGLE SHEET WEBHOOK ───────────────────────────────────────────
-def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url="", run_status="", run_reason="", provider_status="", provider_reason=""):
+def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url=""):
     if not GSHEET_WEBHOOK_URL:
         print("GSHEET_WEBHOOK_URL not set, skipping Google Sheet webhook")
         return
@@ -732,10 +769,6 @@ def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, 
         "final_revision_input_tokens": cost_data.get("final_revision_input_tokens", 0),
         "final_revision_output_tokens": cost_data.get("final_revision_output_tokens", 0),
         "final_revision_cost": cost_data.get("final_revision_cost", 0),
-        "run_status": run_status or "",
-        "run_reason": run_reason or "",
-        "provider_status": provider_status or "",
-        "provider_reason": provider_reason or "",
     }
 
     try:
@@ -746,8 +779,29 @@ def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, 
         print(f"Google Sheet webhook error: {e}")
 
 # ── PROMPTS ────────────────────────────────────────────────────────
-DETAILED_SYSTEM_PROMPT = """ROLE: You are a senior commercial underwriter at Fundara.
-Return a lender-ready markdown underwriting report with these exact sections:
+DETAILED_SYSTEM_PROMPT = """ROLE: You are a senior commercial underwriter at Fundara with 50 years of experience reviewing small-business bank statements, especially construction, trades, restaurants, trucking, and MCA-heavy files.
+
+NON-NEGOTIABLE RULES
+- Never mention AI, models, tools, systems, technology, or uncertainty about being an AI.
+- Present all findings as Fundara AI Underwriting analysis.
+- Be decisive. Do not hedge unnecessarily.
+- Use exact figures from the statements whenever possible.
+- If a figure cannot be supported from the statements, write "Not visible in reviewed statements" instead of guessing.
+- Do not use placeholders like TBD unless the requested field truly is not visible.
+- The report must read like a veteran underwriter who reviewed every line.
+
+STYLE TARGET
+The report must feel forensic, credit-focused, and lender-ready:
+- dense but readable
+- specific counterparties and named payees
+- explicit underwriting logic
+- clear approval/decline rationale
+- conservative interpretation of ambiguous items
+
+FORMAT
+Markdown only. No intro, no outro, no code fences.
+Use exactly these sections and this order:
+
 ## Section 0: Decision Snapshot
 ## Section 1: SCORECARD
 ## Section 2: Deal Sheet
@@ -760,7 +814,114 @@ Return a lender-ready markdown underwriting report with these exact sections:
 ## Section 9: Notice-Only
 ## Section 10: Online Presence
 ## Section 11: Failure & Scope
-Never mention AI or tools. Use exact figures where visible."""
+
+GLOBAL FORMATTING RULES
+- USD must be whole-dollar or 2-decimal currency with commas
+- percentages to 1 decimal when needed
+- mask account numbers
+- use tables whenever appropriate
+- one blank line between sections
+- do not skip sections
+- do not write generic filler
+
+SECTION REQUIREMENTS
+
+Section 0: Decision Snapshot
+- Max 450 words
+- First line must be exactly: **RECOMMENDATION: APPROVE**, **RECOMMENDATION: CONDITIONAL APPROVAL**, or **RECOMMENDATION: DECLINE**
+- Then provide a tight underwriting narrative with exact figures
+- Must include:
+  - total reviewed deposits
+  - average monthly deposits
+  - ending balance trend
+  - overdraft / low-balance behavior
+  - existing debt burden / MCA burden
+  - deposit concentration observations
+  - final underwriting conclusion
+- End with a plain-English lender conclusion
+
+Section 1: SCORECARD
+Use a 5-column table:
+| Category | Weight | Score | Weighted Score | Notes |
+- Categories:
+  Deposits, Net Cash Flow, Ledger Balance, Overdraft Days, MCA Density, Tax Compliance, Vendor Concentration, Seasonality, New Capital, Statement Integrity, TOTAL SCORE
+- Score scale: 1 best, 5 weakest
+- EVERY row must include a Notes explanation with specific evidence
+- TOTAL SCORE row must include a rating band and underwriting meaning
+
+Section 2: Deal Sheet
+Use a 2-column table:
+| Field | Value |
+Populate as many of these as visible:
+Applicant Name, Business Name, DBA, Business Address, Mailing Address, Business Type, Account Number, Bank, Account Status, Statement Period Reviewed, Opening Balance, Closing Balance, Total Reviewed Deposits, Total Reviewed Withdrawals, Total Checks Cleared, Total Service Fees, Net Cash Flow, Monthly Average Deposits, Monthly Average Withdrawals, Average Ledger Balance, Overdraft Fees, Overdraft Days Count, Primary Income Source, Largest Single Deposit, Largest Single Withdrawal, Daily Min Balance, Daily Max Balance, MCA Presence, Credit Card Exposure, Other Financing Exposure, Utility Expense, Insurance, Telecom, Business Registration, Tax ID / EIN, Business License, Years in Operation, Employees, Requested Funding Amount, Recommended Loan Amount, Term, APR, Monthly Payment, Collateral Status, Fundara Recommendation
+- If not visible, write "Not visible in reviewed statements"
+- Do not leave blank cells
+
+Section 3: Monthly Ledger Table
+Use a comprehensive monthly table with:
+| Month | Opening Balance | Deposits | Withdrawals | Checks Cleared | Service Fees | Ending Balance | Avg Ledger Balance | Overdraft Days | Low Days (<$100) |
+- Include every reviewed month plus a total row
+- After the table, add 4-6 bullet observations with exact trends
+
+Section 4: Portfolio Metrics
+Use one main table:
+| Metric | Value | Assessment |
+Must include:
+- Total Reviewed Deposits
+- Total Reviewed Withdrawals
+- Average Monthly Deposits
+- Average Monthly Withdrawals
+- Monthly Net Cash Flow
+- Deposit Mix
+- Top Deposit Sources
+- Top 5 Expense Sinks
+- MCA Position Detail
+- Credit Burden
+- Liquidity Pattern
+- Revenue Concentration
+- Cash Usage Pattern
+Assess each metric like an underwriter, not a data dump.
+
+Section 5: Business Info
+Use a 2-column table of business identity facts supported by the statements.
+
+Section 6: Bank Info
+Use a 2-column table with bank/account observations.
+
+Section 7: Red Flags
+Use a 4-column table:
+| Severity | Flag | Evidence | Impact |
+- Severity must be CRITICAL / HIGH / MEDIUM / LOW
+- Include only real red flags supported by statement evidence
+- Prefer specific anomalies:
+  - chronic overdrafts
+  - MCA stacking
+  - out-of-state address mismatch
+  - repetitive identical checks
+  - returned items
+  - chargebacks
+  - heavy ATM/cash activity
+  - deposit concentration
+  - informal P2P revenue
+  - timing crisis despite healthy deposits
+
+Section 8: About the Business
+Write 1 substantive paragraph describing what the business appears to do, how it likely operates, and how money appears to move through the account.
+
+Section 9: Notice-Only
+Write a short operational/lender note. Not filler.
+
+Section 10: Online Presence
+If not visible from statements, say so plainly. Do not invent websites or social media.
+
+Section 11: Failure & Scope
+Write 2 concise bullets:
+- Failure Risk
+- Scope for Improvement
+
+QUALITY BAR
+This report must be decisive, evidence-heavy, complete, and lender-grade.
+"""
 
 DETAILED_USER_PROMPT = """Create the full detailed Fundara underwriting report now.
 
@@ -770,11 +931,44 @@ BANK STATEMENTS:
 {combined_text}
 """
 
-QUICK_SYSTEM_PROMPT = """ROLE: You are a senior Fundara underwriter creating a fast screening memo.
-Return ONLY:
+QUICK_SYSTEM_PROMPT = """ROLE: You are a senior Fundara underwriter creating a fast screening memo from bank statements.
+
+NON-NEGOTIABLE RULES
+- Never mention AI, models, tools, or technology.
+- Present all findings as Fundara AI Underwriting analysis.
+- Be concise but decisive.
+- Use exact numbers from the statements whenever possible.
+- If not visible, write "Not visible in reviewed statements".
+- No placeholders like TBD.
+
+OUTPUT FORMAT
+Markdown only.
+Return ONLY these two sections in this exact order:
+
 ## Section 0: Decision Snapshot
 ## Section 2: Deal Sheet
-Never mention AI or tools. Be concise but decisive."""
+
+SECTION 0 REQUIREMENTS
+- 180-300 words
+- First line must be exactly one of:
+  **RECOMMENDATION: APPROVE**
+  **RECOMMENDATION: CONDITIONAL APPROVAL**
+  **RECOMMENDATION: DECLINE**
+- Must include:
+  - total reviewed deposits
+  - average monthly deposits
+  - ending/ledger condition
+  - overdraft or low-balance condition
+  - existing MCA / financing burden if present
+  - one concise final underwriting conclusion
+
+SECTION 2 REQUIREMENTS
+Use exactly one table:
+| Field | Value |
+
+Include:
+Applicant Name, Business Name, Business Type, Bank, Account Number, Statement Period Reviewed, Opening Balance, Closing Balance, Total Reviewed Deposits, Total Reviewed Withdrawals, Net Cash Flow, Monthly Average Deposits, Monthly Average Withdrawals, Average Ledger Balance, Overdraft Fees, Overdraft Days Count, Primary Income Source, Largest Single Deposit, Largest Single Withdrawal, MCA Presence, Other Financing Exposure, Requested Funding Amount, Recommended Loan Amount, Term, APR, Monthly Payment, Fundara Recommendation
+"""
 
 QUICK_USER_PROMPT = """Create the quick Fundara underwriting screen now.
 
@@ -813,26 +1007,24 @@ def analyze_with_openai(combined_text, report_type):
             "https://api.openai.com/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=60,
+            timeout=180,
         )
         data = r.json()
         print(f"OpenAI response status: {r.status_code}")
 
         if "choices" not in data:
             print(f"OpenAI error response: {data}")
-            return {
-                "content": None,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "cost": 0,
-                "provider": "openai",
-                "error_message": json.dumps(data),
-            }
+            return None
 
         usage = data.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
-        cost = calc_cost(prompt_tokens, completion_tokens, OPENAI_INPUT_PER_M, OPENAI_OUTPUT_PER_M)
+        cost = calc_cost(
+            prompt_tokens,
+            completion_tokens,
+            OPENAI_INPUT_PER_M,
+            OPENAI_OUTPUT_PER_M
+        )
 
         return {
             "content": data["choices"][0]["message"]["content"],
@@ -840,18 +1032,10 @@ def analyze_with_openai(combined_text, report_type):
             "completion_tokens": completion_tokens,
             "cost": cost,
             "provider": "openai",
-            "error_message": "",
         }
     except Exception as openai_err:
         print(f"OpenAI exception: {openai_err}")
-        return {
-            "content": None,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cost": 0,
-            "provider": "openai",
-            "error_message": str(openai_err),
-        }
+        return None
 
 
 def analyze_with_claude(combined_text, report_type):
@@ -869,7 +1053,12 @@ def analyze_with_claude(combined_text, report_type):
 
         input_tokens = getattr(message.usage, "input_tokens", 0)
         output_tokens = getattr(message.usage, "output_tokens", 0)
-        cost = calc_cost(input_tokens, output_tokens, ANTHROPIC_INPUT_PER_M, ANTHROPIC_OUTPUT_PER_M)
+        cost = calc_cost(
+            input_tokens,
+            output_tokens,
+            ANTHROPIC_INPUT_PER_M,
+            ANTHROPIC_OUTPUT_PER_M
+        )
 
         return {
             "content": message.content[0].text,
@@ -877,18 +1066,10 @@ def analyze_with_claude(combined_text, report_type):
             "output_tokens": output_tokens,
             "cost": cost,
             "provider": "claude",
-            "error_message": "",
         }
     except Exception as claude_err:
         print(f"Claude exception: {claude_err}")
-        return {
-            "content": None,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cost": 0,
-            "provider": "claude",
-            "error_message": str(claude_err),
-        }
+        return None
 
 
 def analyze_with_grok(combined_text, report_type):
@@ -913,26 +1094,24 @@ def analyze_with_grok(combined_text, report_type):
             "https://api.x.ai/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=60,
+            timeout=180,
         )
         data = r.json()
         print(f"Grok response status: {r.status_code}")
 
         if "choices" not in data:
             print(f"Grok error response: {data}")
-            return {
-                "content": None,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "cost": 0,
-                "provider": "grok",
-                "error_message": json.dumps(data),
-            }
+            return None
 
         usage = data.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
-        cost = calc_cost(prompt_tokens, completion_tokens, GROK_INPUT_PER_M, GROK_OUTPUT_PER_M)
+        cost = calc_cost(
+            prompt_tokens,
+            completion_tokens,
+            GROK_INPUT_PER_M,
+            GROK_OUTPUT_PER_M
+        )
 
         return {
             "content": data["choices"][0]["message"]["content"],
@@ -940,18 +1119,10 @@ def analyze_with_grok(combined_text, report_type):
             "completion_tokens": completion_tokens,
             "cost": cost,
             "provider": "grok",
-            "error_message": "",
         }
     except Exception as grok_err:
         print(f"Grok exception: {grok_err}")
-        return {
-            "content": None,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cost": 0,
-            "provider": "grok",
-            "error_message": str(grok_err),
-        }
+        return None
 
 
 def choose_base_report(results):
@@ -960,18 +1131,36 @@ def choose_base_report(results):
         item = results.get(key)
         if item and item.get("content") and len(item["content"].strip()) > 100:
             candidates.append(item)
+
     if not candidates:
         return None
+
     return max(candidates, key=lambda x: len(x["content"]))
 
 
 def revise_final_with_claude(base_report, report2, report3, report_type):
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
-        revision_prompt = f"""You are the final senior underwriting editor at Fundara.
-Keep the BASE REPORT as the backbone.
-Improve it with valid facts from reviewer drafts.
-Do not mention AI or drafting process.
+
+        if report_type == "Quick":
+            revision_prompt = f"""You are the final senior underwriting editor at Fundara.
+
+You are revising a QUICK underwriting memo.
+
+YOUR JOB
+- Keep the BASE REPORT as the backbone
+- Improve it using only clearly supported details from the two reviewer drafts
+- Preserve or improve specificity
+- Do NOT make it longer than necessary
+- Return ONLY these two sections:
+  - ## Section 0: Decision Snapshot
+  - ## Section 2: Deal Sheet
+
+NON-NEGOTIABLE RULES
+- Do not mention AI, tools, models, or drafting process
+- If reviewers disagree, choose the most conservative supportable figure
+- Do not weaken recommendation language
+- The final result must be as complete or better than the base report, never worse
 
 BASE REPORT:
 {base_report}
@@ -981,25 +1170,68 @@ REVIEWER REPORT 2:
 
 REVIEWER REPORT 3:
 {report3 or "No reviewer report available."}
+
+Return the final revised QUICK Fundara underwriting report now.
 """
+            max_tokens = 2600
+        else:
+            revision_prompt = f"""You are the final senior underwriting editor at Fundara.
+
+You are revising a DETAILED underwriting report.
+
+YOUR JOB
+- Keep the BASE REPORT as the backbone
+- Upgrade it with any better facts, stronger red flags, tighter numbers, missing details, or stronger underwriting logic from the reviewer drafts
+- Do NOT compress the report into a summary
+- Do NOT simplify tables unless the base report is clearly wrong
+- Preserve section structure and richness
+- The final report must be at least as detailed as the strongest source draft
+
+NON-NEGOTIABLE RULES
+- Do not mention AI, tools, models, technology, or drafting process
+- Do not remove specific named counterparties, exact figures, or concrete risk logic unless unsupported
+- If drafts disagree, choose the most conservative supportable figure
+- Ensure Section 1 keeps Notes detail
+- Ensure Section 2 is fully populated with no blank values
+- Ensure Section 3 and Section 4 stay dense and lender-grade
+- Ensure Section 7 has severity, evidence, and impact
+- Maintain decisive lender-ready tone
+
+BASE REPORT:
+{base_report}
+
+REVIEWER REPORT 2:
+{report2 or "No reviewer report available."}
+
+REVIEWER REPORT 3:
+{report3 or "No reviewer report available."}
+
+Return the final revised DETAILED Fundara underwriting report now.
+"""
+            max_tokens = 6500
 
         message = client.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=2600 if report_type == "Quick" else 6500,
+            max_tokens=max_tokens,
             messages=[{"role": "user", "content": revision_prompt}],
         )
 
         input_tokens = getattr(message.usage, "input_tokens", 0)
         output_tokens = getattr(message.usage, "output_tokens", 0)
-        cost = calc_cost(input_tokens, output_tokens, ANTHROPIC_INPUT_PER_M, ANTHROPIC_OUTPUT_PER_M)
+        cost = calc_cost(
+            input_tokens,
+            output_tokens,
+            ANTHROPIC_INPUT_PER_M,
+            ANTHROPIC_OUTPUT_PER_M
+        )
 
         return {
             "content": message.content[0].text,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "cost": cost,
-            "error_message": "",
         }
+
     except Exception as merge_err:
         print(f"Final revision exception: {merge_err}")
         return {
@@ -1007,40 +1239,30 @@ REVIEWER REPORT 3:
             "input_tokens": 0,
             "output_tokens": 0,
             "cost": 0,
-            "error_message": str(merge_err),
         }
 
 
 def generate_multi_model_report(combined_text, report_type):
     results = {}
+
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {
+        future_to_key = {
             executor.submit(analyze_with_openai, combined_text, report_type): "openai",
             executor.submit(analyze_with_claude, combined_text, report_type): "claude",
             executor.submit(analyze_with_grok, combined_text, report_type): "grok",
         }
 
-        for future, key in list(futures.items()):
+        for future in as_completed(future_to_key):
+            key = future_to_key[future]
             try:
-                results[key] = future.result(timeout=MODEL_TIMEOUT)
-            except FuturesTimeoutError:
-                print(f"{key} model timeout after {MODEL_TIMEOUT}s")
-                results[key] = {
-                    "content": None,
-                    "cost": 0,
-                    "error_message": f"{key} timeout after {MODEL_TIMEOUT}s",
-                }
+                results[key] = future.result()
             except Exception as err:
                 print(f"{key} future failed: {err}")
-                results[key] = {
-                    "content": None,
-                    "cost": 0,
-                    "error_message": str(err),
-                }
+                results[key] = None
 
     base_item = choose_base_report(results)
     if not base_item:
-        return None, results, {}, "", "", "", ""
+        return None, results, {}
 
     base_report = base_item["content"]
 
@@ -1059,12 +1281,15 @@ def generate_multi_model_report(combined_text, report_type):
         "openai_prompt_tokens": (results.get("openai") or {}).get("prompt_tokens", 0),
         "openai_completion_tokens": (results.get("openai") or {}).get("completion_tokens", 0),
         "openai_cost": (results.get("openai") or {}).get("cost", 0),
+
         "claude_input_tokens": (results.get("claude") or {}).get("input_tokens", 0),
         "claude_output_tokens": (results.get("claude") or {}).get("output_tokens", 0),
         "claude_cost": (results.get("claude") or {}).get("cost", 0),
+
         "grok_prompt_tokens": (results.get("grok") or {}).get("prompt_tokens", 0),
         "grok_completion_tokens": (results.get("grok") or {}).get("completion_tokens", 0),
         "grok_cost": (results.get("grok") or {}).get("cost", 0),
+
         "final_revision_input_tokens": final_revision.get("input_tokens", 0),
         "final_revision_output_tokens": final_revision.get("output_tokens", 0),
         "final_revision_cost": final_revision.get("cost", 0),
@@ -1078,14 +1303,9 @@ def generate_multi_model_report(combined_text, report_type):
         6
     )
 
-    run_status, run_reason = classify_run(results, final_revision)
-    provider_status, provider_reason = classify_provider_state(results)
-
     print(f"RUN COSTS: {json.dumps(cost_data)}")
-    print(f"RUN STATUS: {run_status} | {run_reason}")
-    print(f"PROVIDER STATUS: {provider_status} | {provider_reason}")
 
-    return final_revision["content"], results, cost_data, run_status, run_reason, provider_status, provider_reason
+    return final_revision["content"], results, cost_data
 
 # ── GHL PUSH ───────────────────────────────────────────────────────
 def push_to_ghl(contact_id, report, api_key, pdf_url=""):
@@ -1094,11 +1314,13 @@ def push_to_ghl(contact_id, report, api_key, pdf_url=""):
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Version": "2021-07-28",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
+
         custom_fields = [{"key": "ai_underwriting_analysis", "value": report}]
         if pdf_url:
             custom_fields.append({"key": "ai_underwriting_analysis_pdf", "value": pdf_url})
+
         payload = {"customFields": custom_fields}
         r = requests.put(url, json=payload, headers=headers, timeout=45)
         print(f"GHL push status: {r.status_code}")
@@ -1117,47 +1339,40 @@ def analyze():
         ghl_key = data.get("ghl_api_key") or GHL_API_KEY
 
         raw_report_type = (data.get("report_type") or "").strip().lower()
-        report_type = "Quick" if raw_report_type in ("quick", "quick report") else "Detailed"
+        if raw_report_type in ("quick", "quick report"):
+            report_type = "Quick"
+        else:
+            report_type = "Detailed"
 
         statement_urls = []
         for i in range(1, 11):
             url = data.get(f"bank_statement_{i}")
-            if url and str(url).strip().lower() not in {"null", "", "undefined"}:
+            if url and str(url).lower() != "null":
                 statement_urls.append((i, url))
-            elif url is not None:
-                print(f"Skipping bad statement field bank_statement_{i}: {url}")
 
         if not statement_urls:
-            return jsonify({"error": "No valid bank statements found"}), 400
+            return jsonify({"error": "No bank statements found"}), 400
 
         combined_text = ""
-        successful_statements = 0
-
         for idx, url in statement_urls:
             print(f"Downloading statement {idx}")
             pdf_bytes = download_pdf(url, ghl_key)
-            if not pdf_bytes:
-                print(f"Statement {idx} skipped after download failure")
-                continue
-
-            print(f"Extracting statement {idx}")
-            text = extract_text(pdf_bytes)
-            if text.strip():
-                combined_text += f"\n--- BANK STATEMENT {idx} ---\n{text}\n"
-                successful_statements += 1
-            else:
-                print(f"Statement {idx} had no extractable text")
+            if pdf_bytes:
+                print(f"Extracting statement {idx}")
+                text = extract_text(pdf_bytes)
+                if text.strip():
+                    combined_text += f"\n--- BANK STATEMENT {idx} ---\n{text}\n"
 
         if not combined_text.strip():
-            return jsonify({"error": "Could not extract text from any valid PDFs"}), 400
+            return jsonify({"error": "Could not extract text from any PDFs"}), 400
 
-        print(f"Generating {report_type} report using {successful_statements} statement(s)")
-        final_report, model_results, cost_data, run_status, run_reason, provider_status, provider_reason = generate_multi_model_report(combined_text, report_type)
+        print(f"Generating {report_type} report")
+        final_report, model_results, cost_data = generate_multi_model_report(combined_text, report_type)
 
         if not final_report:
             return jsonify({
                 "error": f"Failed to generate {report_type} report",
-                "model_results_present": {k: bool(v and v.get('content')) for k, v in model_results.items()} if model_results else {},
+                "model_results_present": {k: bool(v) for k, v in model_results.items()} if model_results else {},
             }), 500
 
         print("Converting final report to PDF")
@@ -1166,9 +1381,8 @@ def analyze():
         if pdf_bytes:
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
-        save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url, run_status, run_reason, provider_status, provider_reason)
-        send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url, run_status, run_reason, provider_status, provider_reason)
-        send_backend_alert(location_id, contact_id, report_type, run_status, run_reason, provider_status, provider_reason, pdf_url)
+        save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url)
+        send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url)
         status = push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
 
         return jsonify({
@@ -1179,11 +1393,6 @@ def analyze():
             "location_id": location_id,
             "pdf_url": pdf_url,
             "cost_data": cost_data,
-            "run_status": run_status,
-            "run_reason": run_reason,
-            "provider_status": provider_status,
-            "provider_reason": provider_reason,
-            "successful_statements": successful_statements,
         })
     except Exception as e:
         print(f"/analyze fatal error: {e}")
@@ -1193,6 +1402,13 @@ def analyze():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "running"})
+
+
+@app.route("/cost-summary", methods=["GET"])
+def cost_summary():
+    month = request.args.get("month")
+    summary = get_monthly_cost_summary(month=month)
+    return jsonify(summary)
 
 
 init_db()
