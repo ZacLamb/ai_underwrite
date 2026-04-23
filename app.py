@@ -630,6 +630,8 @@ def init_db():
                 pdf_url TEXT
             );
         """)
+        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS provider_status TEXT;""")
+        cur.execute("""ALTER TABLE underwriting_runs ADD COLUMN IF NOT EXISTS provider_reason TEXT;""")
         conn.commit()
         cur.close()
         print("underwriting_runs table ready")
@@ -640,7 +642,7 @@ def init_db():
             conn.close()
 
 
-def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url=""):
+def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url="", provider_status="", provider_reason=""):
     if not DATABASE_URL:
         print("DATABASE_URL not set, skipping save_run_cost")
         return
@@ -667,9 +669,11 @@ def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url=""):
                 final_revision_output_tokens,
                 final_revision_cost,
                 total_cost,
-                pdf_url
+                pdf_url,
+                provider_status,
+                provider_reason
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """, (
             location_id,
             contact_id,
@@ -687,7 +691,9 @@ def save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url=""):
             cost_data.get("final_revision_output_tokens", 0),
             cost_data.get("final_revision_cost", 0),
             cost_data.get("total_cost", 0),
-            pdf_url
+            pdf_url,
+            provider_status,
+            provider_reason
         ))
         conn.commit()
         cur.close()
@@ -745,8 +751,46 @@ def get_monthly_cost_summary(month=None):
         if conn:
             conn.close()
 
+# ── PROVIDER STATUS HELPERS ────────────────────────────────────────
+def classify_provider_status(results, final_revision):
+    openai_item = results.get("openai") or {}
+    claude_item = results.get("claude") or {}
+    grok_item = results.get("grok") or {}
+
+    openai_ok = bool(openai_item.get("content"))
+    claude_ok = bool(claude_item.get("content"))
+    grok_ok = bool(grok_item.get("content"))
+    revision_ok = bool(final_revision.get("content")) and final_revision.get("input_tokens", 0) > 0
+
+    openai_cost = openai_item.get("cost", 0) or 0
+    claude_cost = claude_item.get("cost", 0) or 0
+    grok_cost = grok_item.get("cost", 0) or 0
+
+    if openai_ok and claude_ok and grok_ok and revision_ok:
+        return "full_success", "OpenAI, Claude, Grok, and final Claude revision all contributed successfully."
+
+    if grok_ok and not openai_ok and not claude_ok:
+        return "grok_only_fallback", "OpenAI and Claude did not return usable content. Grok carried the report."
+
+    if openai_ok and grok_ok and not claude_ok:
+        return "claude_failed", "Claude did not return usable content, but OpenAI and Grok contributed."
+
+    if claude_ok and grok_ok and not openai_ok:
+        return "openai_failed", "OpenAI did not return usable content, but Claude and Grok contributed."
+
+    if openai_ok and claude_ok and not revision_ok:
+        return "final_revision_skipped", "The final Claude revision did not complete, so the base report was used."
+
+    if not openai_ok and not claude_ok and not grok_ok:
+        return "all_models_failed", "None of the providers returned usable content."
+
+    if openai_cost == 0 and claude_cost == 0 and grok_ok:
+        return "grok_only_costless", "Only Grok appears to have contributed tracked usage/cost."
+
+    return "partial_success", "The run completed, but one or more provider stages did not fully contribute."
+
 # ── GOOGLE SHEET WEBHOOK ───────────────────────────────────────────
-def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url=""):
+def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url="", provider_status="", provider_reason=""):
     if not GSHEET_WEBHOOK_URL:
         print("GSHEET_WEBHOOK_URL not set, skipping Google Sheet webhook")
         return
@@ -769,6 +813,8 @@ def send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, 
         "final_revision_input_tokens": cost_data.get("final_revision_input_tokens", 0),
         "final_revision_output_tokens": cost_data.get("final_revision_output_tokens", 0),
         "final_revision_cost": cost_data.get("final_revision_cost", 0),
+        "provider_status": provider_status or "",
+        "provider_reason": provider_reason or "",
     }
 
     try:
@@ -1262,7 +1308,7 @@ def generate_multi_model_report(combined_text, report_type):
 
     base_item = choose_base_report(results)
     if not base_item:
-        return None, results, {}
+        return None, results, {}, "", ""
 
     base_report = base_item["content"]
 
@@ -1303,9 +1349,12 @@ def generate_multi_model_report(combined_text, report_type):
         6
     )
 
-    print(f"RUN COSTS: {json.dumps(cost_data)}")
+    provider_status, provider_reason = classify_provider_status(results, final_revision)
 
-    return final_revision["content"], results, cost_data
+    print(f"RUN COSTS: {json.dumps(cost_data)}")
+    print(f"PROVIDER STATUS: {provider_status} | {provider_reason}")
+
+    return final_revision["content"], results, cost_data, provider_status, provider_reason
 
 # ── GHL PUSH ───────────────────────────────────────────────────────
 def push_to_ghl(contact_id, report, api_key, pdf_url=""):
@@ -1367,7 +1416,7 @@ def analyze():
             return jsonify({"error": "Could not extract text from any PDFs"}), 400
 
         print(f"Generating {report_type} report")
-        final_report, model_results, cost_data = generate_multi_model_report(combined_text, report_type)
+        final_report, model_results, cost_data, provider_status, provider_reason = generate_multi_model_report(combined_text, report_type)
 
         if not final_report:
             return jsonify({
@@ -1381,8 +1430,8 @@ def analyze():
         if pdf_bytes:
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
-        save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url)
-        send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url)
+        save_run_cost(location_id, contact_id, report_type, cost_data, pdf_url, provider_status, provider_reason)
+        send_run_to_gsheet_webhook(location_id, contact_id, report_type, cost_data, pdf_url, provider_status, provider_reason)
         status = push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
 
         return jsonify({
@@ -1393,6 +1442,8 @@ def analyze():
             "location_id": location_id,
             "pdf_url": pdf_url,
             "cost_data": cost_data,
+            "provider_status": provider_status,
+            "provider_reason": provider_reason,
         })
     except Exception as e:
         print(f"/analyze fatal error: {e}")
