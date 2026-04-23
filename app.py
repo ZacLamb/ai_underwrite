@@ -569,15 +569,26 @@ def download_pdf(url, api_key):
         print(f"Download error: {download_err}")
         return None
 
-
 def extract_text(pdf_bytes):
     try:
         text = ""
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            print(f"PDF opened successfully, pages={len(pdf.pages)}")
+
             for page_num, page in enumerate(pdf.pages, start=1):
                 page_text = page.extract_text() or ""
+                words = page.extract_words() or []
+
+                print(
+                    f"Page {page_num}: "
+                    f"text_chars={len(page_text.strip())}, "
+                    f"words={len(words)}, "
+                    f"images={len(page.images)}"
+                )
+
                 if page_text.strip():
                     text += f"\n--- PAGE {page_num} ---\n{page_text}\n"
+
         return text
     except Exception as extract_err:
         print(f"Extract error: {extract_err}")
