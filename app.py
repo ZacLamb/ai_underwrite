@@ -30,6 +30,7 @@ R2_ACCESS_KEY_ID     = os.environ.get("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY")
 R2_ACCOUNT_ID        = os.environ.get("R2_ACCOUNT_ID")
 R2_PUBLIC_URL        = os.environ.get("R2_PUBLIC_URL")
+GSHEET_WEBHOOK_URL   = os.environ.get("GSHEET_WEBHOOK_URL", "")
 R2_BUCKET            = "fundara-reports"
 LOGO_URL             = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
@@ -483,7 +484,7 @@ def extract_text(pdf_bytes):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-                    print(f"Page {idx+1}: text_chars={len(page_text)}, words={len(page_text.split())}")
+                    print(f"Page {idx+1}: text_chars={len(page_text)}, words={len(page_text.split())}, images={len(page.images)}")
         return text
     except Exception as e:
         print(f"Extract error: {e}")
@@ -493,16 +494,52 @@ def extract_text(pdf_bytes):
 def push_to_ghl(contact_id, report, api_key, pdf_url=""):
     try:
         url = f"https://services.leadconnectorhq.com/contacts/{contact_id}"
-        headers = {"Authorization": f"Bearer {api_key}", "Version": "2021-07-28", "Content-Type": "application/json"}
-        custom_fields = [{"key": "ai_underwriting_analysis", "value": report}]
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Version": "2021-07-28",
+            "Content-Type": "application/json"
+        }
+        custom_fields = [
+            {"key": "ai_underwriting_analysis", "value": report}
+        ]
         if pdf_url:
             custom_fields.append({"key": "ai_underwriting_analysis_pdf", "value": pdf_url})
-        r = requests.put(url, json={"customFields": custom_fields}, headers=headers, timeout=30)
+            print(f"Including PDF URL in GHL push: {pdf_url}")
+        else:
+            print("Warning: no PDF URL to push to GHL")
+
+        payload = {"customFields": custom_fields}
+        print(f"GHL payload custom_fields count: {len(custom_fields)}")
+        r = requests.put(url, json=payload, headers=headers, timeout=30)
         print(f"GHL push status: {r.status_code}")
+        print(f"GHL push response: {r.text[:300]}")
         return r.status_code
     except Exception as e:
         print(f"GHL push error: {e}")
         return 500
+
+
+def save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data):
+    if not GSHEET_WEBHOOK_URL:
+        print("No GSHEET_WEBHOOK_URL set, skipping")
+        return
+    try:
+        payload = {
+            "location_id": location_id,
+            "contact_id": contact_id,
+            "report_type": report_type,
+            "pdf_url": pdf_url,
+            "total_cost": cost_data.get("total_cost", 0),
+            "claude_cost": cost_data.get("claude_cost", 0),
+            "openai_cost": cost_data.get("openai_cost", 0),
+            "grok_cost": cost_data.get("grok_cost", 0),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+        }
+        r = requests.post(GSHEET_WEBHOOK_URL, json=payload, timeout=20)
+        print(f"Google Sheet webhook status: {r.status_code}")
+        print(f"Google Sheet webhook response: {r.text[:200]}")
+    except Exception as e:
+        print(f"Google Sheet webhook error: {e}")
 
 
 def analyze_with_openai(combined_text, system_prompt, user_prompt):
@@ -590,7 +627,7 @@ CRITICAL — produce an EXHAUSTIVE, FORENSIC-LEVEL report:
 - Section 1: Scorecard must include a Notes column for EVERY criterion explaining WHY that score was given with specific evidence
 - Section 2: Deal Sheet must be comprehensive — never leave fields as TBD or N/A without explanation
 - Section 3: Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month
-- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks with payee names and amounts
+- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks with payee names
 - Section 7: Red Flags must be a severity-tagged table with columns: Severity, Flag, Evidence, Impact
 - Sections 8-11: Must contain substantive narrative, not placeholder text
 Use the most conservative figures across all analyses.
@@ -613,7 +650,6 @@ RULES:
 
 Produce the final merged Fundara underwriting report:"""
 
-    # Try Claude first
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
@@ -626,7 +662,6 @@ Produce the final merged Fundara underwriting report:"""
     except Exception as e:
         print(f"Claude merge failed: {e}")
 
-    # Fall back to OpenAI
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
@@ -638,7 +673,6 @@ Produce the final merged Fundara underwriting report:"""
     except Exception as e:
         print(f"OpenAI merge failed: {e}")
 
-    # Fall back to Grok
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "grok-3-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
@@ -716,6 +750,15 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
         push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
+
+        cost_data = {
+            "total_cost": 0,
+            "claude_cost": 0,
+            "openai_cost": 0,
+            "grok_cost": 0
+        }
+        save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data)
+
         print(f"Analysis complete for contact {contact_id}")
 
     except Exception as e:
@@ -737,11 +780,19 @@ def analyze():
     if not contact_id:
         return jsonify({"error": "No contact ID provided"}), 400
 
-    thread = threading.Thread(target=run_analysis, args=(data, contact_id, location_id, ghl_key, report_type))
+    thread = threading.Thread(
+        target=run_analysis,
+        args=(data, contact_id, location_id, ghl_key, report_type)
+    )
     thread.daemon = True
     thread.start()
 
-    return jsonify({"success": True, "message": "Analysis started", "contact_id": contact_id, "report_type": report_type}), 200
+    return jsonify({
+        "success": True,
+        "message": "Analysis started",
+        "contact_id": contact_id,
+        "report_type": report_type
+    }), 200
 
 
 @app.route("/health", methods=["GET"])
