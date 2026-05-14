@@ -52,10 +52,12 @@ W_PAGE  = 7.0 * inch
 SYSTEM_PROMPT = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; restaurants & MCA). Tool-driven extraction only; NEVER reveal internal reasoning; no approximations. If unparseable, state cause.
 
 IMPORTANT: Never mention any AI companies, models, tools, or technologies in your output. Present all findings as Fundara AI Underwriting analysis only.
+IMPORTANT: Do NOT include "fundara.co" or any URLs in your output.
+IMPORTANT: Do NOT include any title lines like "MERGED FUNDARA UNDERWRITING REPORT" or "FUNDARA AI UNDERWRITING ANALYSIS REPORT". Start directly with ## Section 0: Decision Snapshot.
 
 FORMAT (strict)
 - Markdown only, PDF-ready. No charts/images.
-- Put Section 0: Decision Snapshot FIRST (<=400 words).
+- Start directly with ## Section 0: Decision Snapshot
 - Use tables; minimal prose; unknown -> N/A.
 - USD whole dollars with commas; % to 1 decimal.
 - Mask account numbers.
@@ -88,23 +90,27 @@ OUTPUT ORDER
 10) Online Presence
 11) Failure & Scope"""
 
-USER_PROMPT = """Render a clean, print-ready underwriting report. Section 0 Decision Snapshot first (<=400 words), then Sections 1-11.
+USER_PROMPT = """Render a clean, print-ready underwriting report. Start directly with ## Section 0: Decision Snapshot, then Sections 1-11.
 - Markdown only; tables preferred; omit N/A rows; one blank line between sections.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
+- Do NOT include fundara.co or any URLs.
+- Do NOT include any title line above Section 0. Start the report with ## Section 0: Decision Snapshot.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
-- CRITICAL: Section 0 must lead with RECOMMENDATION: APPROVE / DECLINE / CONDITIONAL in bold.
-- CRITICAL: Section 1 Scorecard must include a Notes column explaining WHY each score was given with specific evidence from the statements.
+- CRITICAL: Section 0 must have RECOMMENDATION: APPROVE or RECOMMENDATION: DECLINE or RECOMMENDATION: CONDITIONAL on its own line.
+- CRITICAL: Section 1 Scorecard must include a Notes column explaining WHY each score was given with specific evidence.
 - CRITICAL: Section 2 Deal Sheet must be exhaustive — never leave fields as TBD.
 - CRITICAL: Section 3 Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month.
-- CRITICAL: Section 7 Red Flags must be a table with columns: Severity, Flag, Evidence, Impact. Flag specific anomalies like identical check amounts, out-of-state addresses, round-trip transactions.
+- CRITICAL: Section 7 Red Flags must be a table with columns: Severity, Flag, Evidence, Impact.
 
 Here are the bank statements:
 
 {combined_text}"""
 
-SYSTEM_PROMPT_QUICK = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; MCA focus). Quick-scan mode. Extract only what is needed for a broker to make a fast funding decision.
+SYSTEM_PROMPT_QUICK = """ROLE: Senior COMMERCIAL UNDERWRITER (50y; MCA focus). Quick-scan mode.
 
 IMPORTANT: Never mention any AI companies, models, tools, or technologies. Present all findings as Fundara AI Underwriting analysis only.
+IMPORTANT: Do NOT include "fundara.co" or any URLs in your output.
+IMPORTANT: Do NOT include any title lines. Start directly with ## Section 0 - Decision Snapshot.
 
 FORMAT (strict)
 - Markdown only. No charts/images.
@@ -140,10 +146,12 @@ rows for: Avg Monthly Deposits, Avg Daily Balance, Total Deposits, Negative Days
 Use ONLY these two 2-column tables. Do NOT create a wide multi-column table."""
 
 USER_PROMPT_QUICK = """Render a quick broker decision report with ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
+- Start directly with ## Section 0 - Decision Snapshot. Do NOT include any title above it.
+- Do NOT include fundara.co or any URLs.
 - Markdown only; one blank line between sections.
 - Use ## for section headings and ### for table headings.
 - Section 0: bullet list format, concise.
-- Section 2: TWO separate 2-column tables (Field | Value). First for business info, second for financials and decision.
+- Section 2: TWO separate 2-column tables (Field | Value).
 - Do NOT create a wide multi-column table.
 - USD whole dollars with commas; percentages 1 decimal; mask account numbers.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
@@ -286,12 +294,40 @@ def _section_header(title):
 
 
 def _decision_banner(text):
-    is_decline = 'DECLINE' in text.upper()
-    c = RED if is_decline else GREEN
-    bg = HexColor('#150505') if is_decline else HexColor('#051505')
+    t = text.upper()
+    if 'DECLINE' in t:
+        c = RED
+        bg = HexColor('#150505')
+    elif 'CONDITIONAL' in t:
+        c = ORANGE
+        bg = HexColor('#150A00')
+    else:
+        c = GREEN
+        bg = HexColor('#051505')
     banner = Table([[Paragraph(text.strip(), ParagraphStyle('dec', fontName='Helvetica-Bold', fontSize=22, textColor=c, alignment=TA_CENTER, leading=28))]], colWidths=[W_PAGE])
-    banner.setStyle(TableStyle([('BACKGROUND', (0,0),(-1,-1), bg), ('BOX', (0,0),(-1,-1), 2, c), ('TOPPADDING', (0,0),(-1,-1), 14), ('BOTTOMPADDING', (0,0),(-1,-1), 14)]))
+    banner.setStyle(TableStyle([
+        ('BACKGROUND', (0,0),(-1,-1), bg),
+        ('BOX', (0,0),(-1,-1), 2, c),
+        ('TOPPADDING', (0,0),(-1,-1), 14),
+        ('BOTTOMPADDING', (0,0),(-1,-1), 14)
+    ]))
     return banner
+
+
+def _should_skip_line(stripped):
+    s = stripped.upper()
+    skip_patterns = [
+        'FUNDARA.CO',
+        'MERGED FUNDARA',
+        'FUNDARA AI UNDERWRITING ANALYSIS REPORT',
+        'FUNDARA AI UNDERWRITING REPORT',
+    ]
+    for p in skip_patterns:
+        if s.startswith(p) or s == p:
+            return True
+    if re.match(r'^https?://', stripped):
+        return True
+    return False
 
 
 def markdown_to_flowables(md):
@@ -315,6 +351,11 @@ def markdown_to_flowables(md):
         if not stripped:
             flush_table()
             story.append(Spacer(1, 5))
+            i += 1
+            continue
+
+        # Skip unwanted lines
+        if _should_skip_line(stripped):
             i += 1
             continue
 
@@ -402,7 +443,7 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
             if r.status_code == 200:
                 logo_bytes = r.content
                 logo_img_draw = Image(io.BytesIO(logo_bytes), width=1.6*inch, height=0.38*inch)
-                logo_img_flow = Image(io.BytesIO(logo_bytes), width=2.4*inch, height=0.56*inch)
+                logo_img_flow = Image(io.BytesIO(logo_bytes), width=1.6*inch, height=0.38*inch)
                 logo_img_flow.hAlign = 'LEFT'
         except Exception:
             pass
@@ -499,15 +540,12 @@ def push_to_ghl(contact_id, report, api_key, pdf_url=""):
             "Version": "2021-07-28",
             "Content-Type": "application/json"
         }
-        custom_fields = [
-            {"key": "ai_underwriting_analysis", "value": report}
-        ]
+        custom_fields = [{"key": "ai_underwriting_analysis", "value": report}]
         if pdf_url:
             custom_fields.append({"key": "ai_underwriting_analysis_pdf", "value": pdf_url})
             print(f"Including PDF URL in GHL push: {pdf_url}")
         else:
             print("Warning: no PDF URL to push to GHL")
-
         payload = {"customFields": custom_fields}
         print(f"GHL payload custom_fields count: {len(custom_fields)}")
         r = requests.put(url, json=payload, headers=headers, timeout=30)
@@ -623,16 +661,15 @@ Do NOT create wide multi-column tables."""
     else:
         format_instruction = """Keep Sections 0-11 format using ## headings for each section.
 CRITICAL — produce an EXHAUSTIVE, FORENSIC-LEVEL report:
-- Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and a clear RECOMMENDATION line
-- Section 1: Scorecard must include a Notes column for EVERY criterion explaining WHY that score was given with specific evidence
-- Section 2: Deal Sheet must be comprehensive — never leave fields as TBD or N/A without explanation
+- Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and RECOMMENDATION on its own line
+- Section 1: Scorecard must include a Notes column for EVERY criterion with specific evidence
+- Section 2: Deal Sheet must be comprehensive — never leave fields as TBD
 - Section 3: Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month
-- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks with payee names
+- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks
 - Section 7: Red Flags must be a severity-tagged table with columns: Severity, Flag, Evidence, Impact
-- Sections 8-11: Must contain substantive narrative, not placeholder text
+- Sections 8-11: Must contain substantive narrative
 Use the most conservative figures across all analyses.
-Name specific individuals, payees, and transaction patterns found in the statements.
-The final report must read like it was written by a 50-year veteran underwriter who read every line of every statement."""
+Name specific individuals, payees, and transaction patterns found in the statements."""
 
     analyses_text = ""
     for idx, r in enumerate(available, 1):
@@ -643,12 +680,15 @@ The final report must read like it was written by a 50-year veteran underwriter 
 RULES:
 - Never mention any AI companies, models, tools, or technologies
 - Present all findings as Fundara AI Underwriting analysis
+- Do NOT include "fundara.co" or any URLs
+- Do NOT include any title line above Section 0. Start directly with ## Section 0
+- RECOMMENDATION must appear on its own line in Section 0
 - Use most conservative figures when analyses disagree
 - {format_instruction}
 
 {analyses_text}
 
-Produce the final merged Fundara underwriting report:"""
+Produce the final merged Fundara underwriting report starting with ## Section 0:"""
 
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -751,12 +791,7 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
 
         push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
 
-        cost_data = {
-            "total_cost": 0,
-            "claude_cost": 0,
-            "openai_cost": 0,
-            "grok_cost": 0
-        }
+        cost_data = {"total_cost": 0, "claude_cost": 0, "openai_cost": 0, "grok_cost": 0}
         save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data)
 
         print(f"Analysis complete for contact {contact_id}")
