@@ -34,6 +34,17 @@ GSHEET_WEBHOOK_URL   = os.environ.get("GSHEET_WEBHOOK_URL", "")
 R2_BUCKET            = "fundara-reports"
 LOGO_URL             = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
+# Pricing per 1M tokens (as of 2025)
+# claude-haiku-4-5: $0.80 input / $4.00 output
+# gpt-4o-mini: $0.15 input / $0.60 output
+# grok-3-mini: free tier / negligible
+CLAUDE_INPUT_COST_PER_M  = 0.80
+CLAUDE_OUTPUT_COST_PER_M = 4.00
+OPENAI_INPUT_COST_PER_M  = 0.15
+OPENAI_OUTPUT_COST_PER_M = 0.60
+GROK_INPUT_COST_PER_M    = 0.0
+GROK_OUTPUT_COST_PER_M   = 0.0
+
 BG      = HexColor('#0D1B2A')
 CARD    = HexColor('#152030')
 ROW_ALT = HexColor('#1C2B3A')
@@ -97,7 +108,7 @@ USER_PROMPT = """Render a clean, print-ready underwriting report. Start directly
 - Do NOT include any title line above Section 0. Start the report with ## Section 0: Decision Snapshot.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
 - CRITICAL: Section 0 must have RECOMMENDATION: APPROVE or RECOMMENDATION: DECLINE or RECOMMENDATION: CONDITIONAL on its own line.
-- CRITICAL: Section 1 Scorecard must include a Notes column explaining WHY each score was given with specific evidence.
+- CRITICAL: Section 1 Scorecard must include a Notes column explaining WHY each score was given with specific evidence. Keep notes concise — max 3 sentences per cell.
 - CRITICAL: Section 2 Deal Sheet must be exhaustive — never leave fields as TBD.
 - CRITICAL: Section 3 Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month.
 - CRITICAL: Section 7 Red Flags must be a table with columns: Severity, Flag, Evidence, Impact.
@@ -199,6 +210,7 @@ BASE_TS = TableStyle([
     ('LEFTPADDING',   (0, 0), (-1, -1), 8),
     ('RIGHTPADDING',  (0, 0), (-1, -1), 8),
     ('VALIGN',        (0, 0), (-1, -1), 'MIDDLE'),
+    ('ROWSPLITTING',  (0, 0), (-1, -1), 1),
 ])
 
 
@@ -284,7 +296,7 @@ def _parse_table(lines):
                 sty = _cell_color_style(cell) if ci > 0 else STY['td_b']
             fcells.append(Paragraph(clean, sty))
         flowable_rows.append(fcells)
-    t = Table(flowable_rows, colWidths=col_widths, repeatRows=1)
+    t = Table(flowable_rows, colWidths=col_widths, repeatRows=1, splitByRow=True)
     t.setStyle(BASE_TS)
     return t
 
@@ -354,7 +366,6 @@ def markdown_to_flowables(md):
             i += 1
             continue
 
-        # Skip unwanted lines
         if _should_skip_line(stripped):
             i += 1
             continue
@@ -433,7 +444,8 @@ def convert_to_pdf(markdown_text, report_type="Detailed"):
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter,
             leftMargin=0.6*inch, rightMargin=0.6*inch,
-            topMargin=0.75*inch, bottomMargin=0.55*inch)
+            topMargin=0.75*inch, bottomMargin=0.55*inch,
+            allowSplitting=1)
 
         logo_bytes = None
         logo_img_draw = None
@@ -567,20 +579,31 @@ def save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data):
             "contact_id": contact_id,
             "report_type": report_type,
             "pdf_url": pdf_url,
-            "total_cost": cost_data.get("total_cost", 0),
-            "claude_cost": cost_data.get("claude_cost", 0),
-            "openai_cost": cost_data.get("openai_cost", 0),
-            "grok_cost": cost_data.get("grok_cost", 0),
+            "claude_input_tokens":  cost_data.get("claude_input_tokens", 0),
+            "claude_output_tokens": cost_data.get("claude_output_tokens", 0),
+            "claude_cost":          round(cost_data.get("claude_cost", 0), 6),
+            "openai_input_tokens":  cost_data.get("openai_input_tokens", 0),
+            "openai_output_tokens": cost_data.get("openai_output_tokens", 0),
+            "openai_cost":          round(cost_data.get("openai_cost", 0), 6),
+            "grok_input_tokens":    cost_data.get("grok_input_tokens", 0),
+            "grok_output_tokens":   cost_data.get("grok_output_tokens", 0),
+            "grok_cost":            round(cost_data.get("grok_cost", 0), 6),
+            "merge_input_tokens":   cost_data.get("merge_input_tokens", 0),
+            "merge_output_tokens":  cost_data.get("merge_output_tokens", 0),
+            "merge_cost":           round(cost_data.get("merge_cost", 0), 6),
+            "total_cost":           round(cost_data.get("total_cost", 0), 6),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
         }
         r = requests.post(GSHEET_WEBHOOK_URL, json=payload, timeout=20)
         print(f"Google Sheet webhook status: {r.status_code}")
         print(f"Google Sheet webhook response: {r.text[:200]}")
+        print(f"RUN COSTS: {payload}")
     except Exception as e:
         print(f"Google Sheet webhook error: {e}")
 
 
 def analyze_with_openai(combined_text, system_prompt, user_prompt):
+    cost_data = {"openai_input_tokens": 0, "openai_output_tokens": 0, "openai_cost": 0}
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -596,14 +619,21 @@ def analyze_with_openai(combined_text, system_prompt, user_prompt):
         print(f"OpenAI response status: {r.status_code}")
         if "choices" not in data:
             print(f"OpenAI error: {data}")
-            return ""
-        return data["choices"][0]["message"]["content"]
+            return "", cost_data
+        usage = data.get("usage", {})
+        input_tokens  = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        cost = (input_tokens / 1_000_000 * OPENAI_INPUT_COST_PER_M) + \
+               (output_tokens / 1_000_000 * OPENAI_OUTPUT_COST_PER_M)
+        cost_data = {"openai_input_tokens": input_tokens, "openai_output_tokens": output_tokens, "openai_cost": cost}
+        return data["choices"][0]["message"]["content"], cost_data
     except Exception as e:
         print(f"OpenAI exception: {e}")
-        return ""
+        return "", cost_data
 
 
 def analyze_with_claude(combined_text, system_prompt, user_prompt):
+    cost_data = {"claude_input_tokens": 0, "claude_output_tokens": 0, "claude_cost": 0}
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
@@ -612,13 +642,19 @@ def analyze_with_claude(combined_text, system_prompt, user_prompt):
             system=system_prompt,
             messages=[{"role": "user", "content": user_prompt.format(combined_text=combined_text)}]
         )
-        return message.content[0].text
+        input_tokens  = message.usage.input_tokens
+        output_tokens = message.usage.output_tokens
+        cost = (input_tokens / 1_000_000 * CLAUDE_INPUT_COST_PER_M) + \
+               (output_tokens / 1_000_000 * CLAUDE_OUTPUT_COST_PER_M)
+        cost_data = {"claude_input_tokens": input_tokens, "claude_output_tokens": output_tokens, "claude_cost": cost}
+        return message.content[0].text, cost_data
     except Exception as e:
         print(f"Claude exception: {e}")
-        return ""
+        return "", cost_data
 
 
 def analyze_with_grok(combined_text, system_prompt, user_prompt):
+    cost_data = {"grok_input_tokens": 0, "grok_output_tokens": 0, "grok_cost": 0}
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {
@@ -634,22 +670,29 @@ def analyze_with_grok(combined_text, system_prompt, user_prompt):
         print(f"Grok response status: {r.status_code}")
         if "choices" not in data:
             print(f"Grok error: {data}")
-            return ""
-        return data["choices"][0]["message"]["content"]
+            return "", cost_data
+        usage = data.get("usage", {})
+        input_tokens  = usage.get("prompt_tokens", 0)
+        output_tokens = usage.get("completion_tokens", 0)
+        cost = (input_tokens / 1_000_000 * GROK_INPUT_COST_PER_M) + \
+               (output_tokens / 1_000_000 * GROK_OUTPUT_COST_PER_M)
+        cost_data = {"grok_input_tokens": input_tokens, "grok_output_tokens": output_tokens, "grok_cost": cost}
+        return data["choices"][0]["message"]["content"], cost_data
     except Exception as e:
         print(f"Grok exception: {e}")
-        return ""
+        return "", cost_data
 
 
 def merge_reports(report1, report2, report3, report_type="Detailed"):
+    merge_cost_data = {"merge_input_tokens": 0, "merge_output_tokens": 0, "merge_cost": 0}
     available = [r for r in [report1, report2, report3] if r and len(r) > 200]
 
     if not available:
-        return "No analysis could be completed. All AI models failed. Please check API credits."
+        return "No analysis could be completed. All AI models failed. Please check API credits.", merge_cost_data
 
     if len(available) == 1:
         print("Only 1 analysis available, skipping merge")
-        return available[0]
+        return available[0], merge_cost_data
 
     if report_type == "Quick":
         format_instruction = """Output ONLY Section 0 (Decision Snapshot) and Section 2 (Deal Sheet).
@@ -662,7 +705,7 @@ Do NOT create wide multi-column tables."""
         format_instruction = """Keep Sections 0-11 format using ## headings for each section.
 CRITICAL — produce an EXHAUSTIVE, FORENSIC-LEVEL report:
 - Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and RECOMMENDATION on its own line
-- Section 1: Scorecard must include a Notes column for EVERY criterion with specific evidence
+- Section 1: Scorecard must include a Notes column for EVERY criterion with specific evidence. Keep notes concise — max 3 sentences per cell.
 - Section 2: Deal Sheet must be comprehensive — never leave fields as TBD
 - Section 3: Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month
 - Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks
@@ -690,6 +733,7 @@ RULES:
 
 Produce the final merged Fundara underwriting report starting with ## Section 0:"""
 
+    # Try Claude first
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
@@ -697,22 +741,35 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
             max_tokens=8000,
             messages=[{"role": "user", "content": merge_prompt}]
         )
+        input_tokens  = message.usage.input_tokens
+        output_tokens = message.usage.output_tokens
+        cost = (input_tokens / 1_000_000 * CLAUDE_INPUT_COST_PER_M) + \
+               (output_tokens / 1_000_000 * CLAUDE_OUTPUT_COST_PER_M)
+        merge_cost_data = {"merge_input_tokens": input_tokens, "merge_output_tokens": output_tokens, "merge_cost": cost}
         print("Merge completed by Claude")
-        return message.content[0].text
+        return message.content[0].text, merge_cost_data
     except Exception as e:
         print(f"Claude merge failed: {e}")
 
+    # Fall back to OpenAI
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
         r = requests.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers, timeout=120)
         data = r.json()
         if "choices" in data:
+            usage = data.get("usage", {})
+            input_tokens  = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cost = (input_tokens / 1_000_000 * OPENAI_INPUT_COST_PER_M) + \
+                   (output_tokens / 1_000_000 * OPENAI_OUTPUT_COST_PER_M)
+            merge_cost_data = {"merge_input_tokens": input_tokens, "merge_output_tokens": output_tokens, "merge_cost": cost}
             print("Merge completed by OpenAI fallback")
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"], merge_cost_data
     except Exception as e:
         print(f"OpenAI merge failed: {e}")
 
+    # Fall back to Grok
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "grok-3-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
@@ -720,12 +777,12 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
         data = r.json()
         if "choices" in data:
             print("Merge completed by Grok fallback")
-            return data["choices"][0]["message"]["content"]
+            return data["choices"][0]["message"]["content"], merge_cost_data
     except Exception as e:
         print(f"Grok merge failed: {e}")
 
     print("All merges failed, returning best single analysis")
-    return max(available, key=len)
+    return max(available, key=len), merge_cost_data
 
 
 def run_analysis(data, contact_id, location_id, ghl_key, report_type):
@@ -765,7 +822,10 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
 
         print(f"Generating {report_type} report")
 
-        results = {}
+        openai_result = ("", {"openai_input_tokens": 0, "openai_output_tokens": 0, "openai_cost": 0})
+        claude_result = ("", {"claude_input_tokens": 0, "claude_output_tokens": 0, "claude_cost": 0})
+        grok_result   = ("", {"grok_input_tokens": 0, "grok_output_tokens": 0, "grok_cost": 0})
+
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
                 executor.submit(analyze_with_openai, combined_text, system_prompt, user_prompt): "openai",
@@ -774,24 +834,41 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
             }
             for future in as_completed(futures):
                 key = futures[future]
-                results[key] = future.result()
+                result = future.result()
+                if key == "openai":
+                    openai_result = result
+                elif key == "claude":
+                    claude_result = result
+                elif key == "grok":
+                    grok_result = result
 
-        final_report = merge_reports(
-            results.get("openai", ""),
-            results.get("claude", ""),
-            results.get("grok",   ""),
+        final_report, merge_cost_data = merge_reports(
+            openai_result[0],
+            claude_result[0],
+            grok_result[0],
             report_type
         )
 
-        print("Converting final report to PDF")
+        # Aggregate all costs
+        cost_data = {}
+        cost_data.update(openai_result[1])
+        cost_data.update(claude_result[1])
+        cost_data.update(grok_result[1])
+        cost_data.update(merge_cost_data)
+        cost_data["total_cost"] = (
+            cost_data.get("openai_cost", 0) +
+            cost_data.get("claude_cost", 0) +
+            cost_data.get("grok_cost", 0) +
+            cost_data.get("merge_cost", 0)
+        )
+
+        print(f"Converting final report to PDF")
         pdf_url = ""
         pdf_bytes = convert_to_pdf(final_report, report_type)
         if pdf_bytes:
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
 
         push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
-
-        cost_data = {"total_cost": 0, "claude_cost": 0, "openai_cost": 0, "grok_cost": 0}
         save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data)
 
         print(f"Analysis complete for contact {contact_id}")
