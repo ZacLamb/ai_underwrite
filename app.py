@@ -34,10 +34,6 @@ GSHEET_WEBHOOK_URL   = os.environ.get("GSHEET_WEBHOOK_URL", "")
 R2_BUCKET            = "fundara-reports"
 LOGO_URL             = "https://assets.cdn.filesafe.space/HD59NWC1biIA31IHm1y8/media/69a4925b753f150a68663d79.png"
 
-# Pricing per 1M tokens (as of 2025)
-# claude-haiku-4-5: $0.80 input / $4.00 output
-# gpt-4o-mini: $0.15 input / $0.60 output
-# grok-3-mini: free tier / negligible
 CLAUDE_INPUT_COST_PER_M  = 0.80
 CLAUDE_OUTPUT_COST_PER_M = 4.00
 OPENAI_INPUT_COST_PER_M  = 0.15
@@ -72,6 +68,7 @@ FORMAT (strict)
 - Use tables; minimal prose; unknown -> N/A.
 - USD whole dollars with commas; % to 1 decimal.
 - Mask account numbers.
+- IMPORTANT: Keep all table cell content concise — maximum 3 sentences per cell, maximum 150 words per cell.
 
 BANK STATEMENTS
 Monthly table:
@@ -108,10 +105,10 @@ USER_PROMPT = """Render a clean, print-ready underwriting report. Start directly
 - Do NOT include any title line above Section 0. Start the report with ## Section 0: Decision Snapshot.
 - Do NOT mention any AI tools, models, or companies. Present as Fundara AI analysis only.
 - CRITICAL: Section 0 must have RECOMMENDATION: APPROVE or RECOMMENDATION: DECLINE or RECOMMENDATION: CONDITIONAL on its own line.
-- CRITICAL: Section 1 Scorecard must include a Notes column explaining WHY each score was given with specific evidence. Keep notes concise — max 3 sentences per cell.
+- CRITICAL: Section 1 Scorecard Notes column — max 3 sentences per cell, max 150 words per cell.
 - CRITICAL: Section 2 Deal Sheet must be exhaustive — never leave fields as TBD.
 - CRITICAL: Section 3 Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month.
-- CRITICAL: Section 7 Red Flags must be a table with columns: Severity, Flag, Evidence, Impact.
+- CRITICAL: Section 7 Red Flags must be a table with columns: Severity, Flag, Evidence, Impact. Keep each cell under 100 words.
 
 Here are the bank statements:
 
@@ -272,12 +269,19 @@ def _parse_md_bold(text):
     return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
 
 
+def _truncate_cell(text, max_chars=600):
+    text = text.strip()
+    if len(text) > max_chars:
+        return text[:max_chars] + '...'
+    return text
+
+
 def _parse_table(lines):
     rows = []
     for line in lines:
         if re.match(r'^\|[-| :]+\|$', line.strip()):
             continue
-        cells = [c.strip() for c in line.strip().strip('|').split('|')]
+        cells = [_truncate_cell(c.strip()) for c in line.strip().strip('|').split('|')]
         rows.append(cells)
     if not rows:
         return None
@@ -705,11 +709,11 @@ Do NOT create wide multi-column tables."""
         format_instruction = """Keep Sections 0-11 format using ## headings for each section.
 CRITICAL — produce an EXHAUSTIVE, FORENSIC-LEVEL report:
 - Section 0: Must include specific dollar amounts, named transaction sources, exact dates, and RECOMMENDATION on its own line
-- Section 1: Scorecard must include a Notes column for EVERY criterion with specific evidence. Keep notes concise — max 3 sentences per cell.
+- Section 1: Scorecard must include a Notes column for EVERY criterion. Keep notes to MAX 3 sentences and MAX 150 words per cell.
 - Section 2: Deal Sheet must be comprehensive — never leave fields as TBD
 - Section 3: Monthly Ledger must include Opening Balance, Deposits, Withdrawals, Checks Cleared, Service Fees, Ending Balance, Avg Daily Balance, Overdraft Days, Low Balance Days per month
-- Section 4: Portfolio Metrics must include deposit channel mix %, top-5 deposit sources with names and amounts, top-5 expense sinks
-- Section 7: Red Flags must be a severity-tagged table with columns: Severity, Flag, Evidence, Impact
+- Section 4: Portfolio Metrics — keep each cell concise, max 100 words
+- Section 7: Red Flags must be a severity-tagged table with columns: Severity, Flag, Evidence, Impact. Max 80 words per cell.
 - Sections 8-11: Must contain substantive narrative
 Use the most conservative figures across all analyses.
 Name specific individuals, payees, and transaction patterns found in the statements."""
@@ -727,13 +731,13 @@ RULES:
 - Do NOT include any title line above Section 0. Start directly with ## Section 0
 - RECOMMENDATION must appear on its own line in Section 0
 - Use most conservative figures when analyses disagree
+- Keep all table cell content concise — max 150 words per cell, max 3 sentences per cell
 - {format_instruction}
 
 {analyses_text}
 
 Produce the final merged Fundara underwriting report starting with ## Section 0:"""
 
-    # Try Claude first
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
@@ -751,7 +755,6 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
     except Exception as e:
         print(f"Claude merge failed: {e}")
 
-    # Fall back to OpenAI
     try:
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
@@ -769,7 +772,6 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
     except Exception as e:
         print(f"OpenAI merge failed: {e}")
 
-    # Fall back to Grok
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {"model": "grok-3-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
@@ -849,7 +851,6 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
             report_type
         )
 
-        # Aggregate all costs
         cost_data = {}
         cost_data.update(openai_result[1])
         cost_data.update(claude_result[1])
