@@ -532,20 +532,56 @@ def download_pdf(url, api_key):
     return None
 
 
-def extract_text(pdf_bytes):
+def _ocr_pdf(pdf_bytes):
+    """OCR fallback: rasterize pages with pdf2image and run pytesseract.
+    Used when pdfplumber returns no usable text (e.g. scanned/image-only PDFs)."""
     try:
-        text = ""
+        from pdf2image import convert_from_bytes
+        import pytesseract
+    except Exception as e:
+        print(f"OCR libraries unavailable: {e}")
+        return ""
+    text = ""
+    try:
+        images = convert_from_bytes(pdf_bytes, dpi=200)
+        print(f"OCR fallback: rasterized {len(images)} page(s)")
+    except Exception as e:
+        print(f"OCR rasterize error: {e}")
+        return ""
+    for idx, img in enumerate(images):
+        try:
+            page_text = pytesseract.image_to_string(img) or ""
+        except Exception as e:
+            print(f"OCR error on page {idx+1}: {e}")
+            continue
+        if len(page_text.strip()) < 50:
+            print(f"OCR page {idx+1}: skipped (chars={len(page_text.strip())} < 50)")
+            continue
+        text += page_text + "\n"
+        print(f"OCR page {idx+1}: text_chars={len(page_text)}, words={len(page_text.split())}")
+    return text
+
+
+def extract_text(pdf_bytes):
+    text = ""
+    try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             print(f"PDF opened successfully, pages={len(pdf.pages)}")
             for idx, page in enumerate(pdf.pages):
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-                    print(f"Page {idx+1}: text_chars={len(page_text)}, words={len(page_text.split())}, images={len(page.images)}")
-        return text
+                page_text = page.extract_text() or ""
+                if len(page_text.strip()) < 50:
+                    print(f"Page {idx+1}: skipped (chars={len(page_text.strip())} < 50)")
+                    continue
+                text += page_text + "\n"
+                print(f"Page {idx+1}: text_chars={len(page_text)}, words={len(page_text.split())}, images={len(page.images)}")
     except Exception as e:
         print(f"Extract error: {e}")
-        return ""
+
+    if not text.strip():
+        print("pdfplumber returned no usable text — attempting OCR fallback")
+        text = _ocr_pdf(pdf_bytes)
+
+    return text
 
 
 def push_to_ghl(contact_id, report, api_key, pdf_url=""):
@@ -662,7 +698,7 @@ def analyze_with_grok(combined_text, system_prompt, user_prompt):
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
         payload = {
-            "model": "grok-3-mini",
+            "model": "grok-3",
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt.format(combined_text=combined_text)}
@@ -774,7 +810,7 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
 
     try:
         headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-        payload = {"model": "grok-3-mini", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
+        payload = {"model": "grok-3", "messages": [{"role": "user", "content": merge_prompt}], "max_tokens": 8000}
         r = requests.post("https://api.x.ai/v1/chat/completions", json=payload, headers=headers, timeout=120)
         data = r.json()
         if "choices" in data:
@@ -821,6 +857,10 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
         if not combined_text.strip():
             print(f"No text extracted from any statements for contact {contact_id}")
             return
+
+        if len(combined_text) > 60000:
+            print(f"combined_text length {len(combined_text)} exceeds cap, truncating to 60000")
+            combined_text = combined_text[:60000]
 
         print(f"Generating {report_type} report")
 
