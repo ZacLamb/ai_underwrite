@@ -1,5 +1,6 @@
 [phases.setup]
-nixPkgs = ["python311", "poppler_utils", "tesseract"]
+nixPkgs = ["python311"]
+aptPkgs = ["tesseract-ocr", "poppler-utils"]
 
 [start]
-cmd = "gunicorn app:app --timeout 180 --workers 1"
+cmd = "gunicorn app:app --timeout 600 --workers 1"

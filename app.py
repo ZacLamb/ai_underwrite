@@ -562,8 +562,43 @@ def _ocr_pdf(pdf_bytes):
     return text
 
 
+def _ocr_image_bytes(file_bytes):
+    """OCR a raw image file (JPG/PNG/HEIC photo uploaded instead of a PDF)."""
+    try:
+        from PIL import Image as PILImage
+        import pytesseract
+    except Exception as e:
+        print(f"Image OCR libraries unavailable: {e}")
+        return ""
+    try:
+        img = PILImage.open(io.BytesIO(file_bytes))
+        img.load()
+        print(f"File opened as image: format={img.format}, size={img.size}")
+    except Exception as e:
+        print(f"File is not a readable image either: {e}")
+        return ""
+    try:
+        page_text = pytesseract.image_to_string(img) or ""
+    except Exception as e:
+        print(f"Image OCR error: {e}")
+        return ""
+    if len(page_text.strip()) < 50:
+        print(f"Image OCR: skipped (chars={len(page_text.strip())} < 50)")
+        return ""
+    print(f"Image OCR: text_chars={len(page_text)}, words={len(page_text.split())}")
+    return page_text + "\n"
+
+
 def extract_text(pdf_bytes):
     text = ""
+
+    # Magic-byte check: %PDF header may be preceded by junk bytes, so scan
+    # the first 1KB. If it's not a PDF at all, don't waste time on
+    # pdfplumber/poppler — try opening it as an image and OCR directly.
+    if b"%PDF" not in pdf_bytes[:1024]:
+        print("File does not look like a PDF (no %PDF header) — attempting image OCR")
+        return _ocr_image_bytes(pdf_bytes)
+
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             print(f"PDF opened successfully, pages={len(pdf.pages)}")
