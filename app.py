@@ -858,6 +858,22 @@ Produce the final merged Fundara underwriting report starting with ## Section 0:
     return max(available, key=len), merge_cost_data
 
 
+def report_failure(contact_id, location_id, ghl_key, report_type, reason, cost_data=None):
+    """Push a FAILED status with reason to both GHL and the Google Sheet so
+    every run leaves a trace, even when no report could be produced."""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    msg = f"FAILED: {reason}"[:500]
+    print(f"Reporting failure for contact {contact_id}: {msg}")
+    try:
+        push_to_ghl(contact_id, f"{msg} ({ts})", ghl_key, msg)
+    except Exception as e:
+        print(f"Failure push to GHL error: {e}")
+    try:
+        save_to_gsheet(location_id, contact_id, report_type, msg, cost_data or {})
+    except Exception as e:
+        print(f"Failure push to Google Sheet error: {e}")
+
+
 def run_analysis(data, contact_id, location_id, ghl_key, report_type):
     try:
         system_prompt = SYSTEM_PROMPT_QUICK if report_type == "Quick" else SYSTEM_PROMPT
@@ -871,9 +887,12 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
 
         if not statement_urls:
             print(f"No bank statements found for contact {contact_id}")
+            report_failure(contact_id, location_id, ghl_key, report_type,
+                           "No bank statement URLs found on contact")
             return
 
         combined_text = ""
+        statement_notes = []
         for idx, url in statement_urls:
             print(f"Statement {idx} URL: {url}")
             print(f"Downloading statement {idx}")
@@ -886,11 +905,17 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
                     print(f"Statement {idx} added to combined_text")
                 else:
                     print(f"Warning: no text extracted from statement {idx}")
+                    statement_notes.append(f"Stmt {idx}: unreadable (no text via extraction or OCR)")
             else:
                 print(f"Warning: could not download statement {idx}, skipping")
+                statement_notes.append(f"Stmt {idx}: download failed")
 
         if not combined_text.strip():
             print(f"No text extracted from any statements for contact {contact_id}")
+            reason = "No text extracted from any statements"
+            if statement_notes:
+                reason += " — " + "; ".join(statement_notes)
+            report_failure(contact_id, location_id, ghl_key, report_type, reason)
             return
 
         if len(combined_text) > 60000:
@@ -919,6 +944,21 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
                 elif key == "grok":
                     grok_result = result
 
+        cost_data = {}
+        cost_data.update(openai_result[1])
+        cost_data.update(claude_result[1])
+        cost_data.update(grok_result[1])
+
+        if not (openai_result[0] or claude_result[0] or grok_result[0]):
+            cost_data["total_cost"] = (
+                cost_data.get("openai_cost", 0) +
+                cost_data.get("claude_cost", 0) +
+                cost_data.get("grok_cost", 0)
+            )
+            report_failure(contact_id, location_id, ghl_key, report_type,
+                           "All AI models failed — check API credits/keys", cost_data)
+            return
+
         final_report, merge_cost_data = merge_reports(
             openai_result[0],
             claude_result[0],
@@ -926,10 +966,6 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
             report_type
         )
 
-        cost_data = {}
-        cost_data.update(openai_result[1])
-        cost_data.update(claude_result[1])
-        cost_data.update(grok_result[1])
         cost_data.update(merge_cost_data)
         cost_data["total_cost"] = (
             cost_data.get("openai_cost", 0) +
@@ -943,6 +979,10 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
         pdf_bytes = convert_to_pdf(final_report, report_type)
         if pdf_bytes:
             pdf_url = upload_to_r2(pdf_bytes, contact_id) or ""
+            if not pdf_url:
+                pdf_url = "FAILED: R2 upload error (report text still saved to GHL)"
+        else:
+            pdf_url = "FAILED: PDF generation error (report text still saved to GHL)"
 
         push_to_ghl(contact_id, final_report, ghl_key, pdf_url)
         save_to_gsheet(location_id, contact_id, report_type, pdf_url, cost_data)
@@ -951,6 +991,11 @@ def run_analysis(data, contact_id, location_id, ghl_key, report_type):
 
     except Exception as e:
         print(f"run_analysis error for contact {contact_id}: {e}")
+        try:
+            report_failure(contact_id, location_id, ghl_key, report_type,
+                           f"Unexpected error: {e}")
+        except Exception as e2:
+            print(f"Could not report failure: {e2}")
 
 
 @app.route("/analyze", methods=["POST"])
